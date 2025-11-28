@@ -1,9 +1,14 @@
 //! unifree - CLI tool for UniFi AP management
-//!
+//! 
 //! This tool communicates with the unifreed daemon to manage UniFi access points.
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use std::collections::HashMap;
+use std::str::FromStr;
+
+use unifree_common::state::{DeviceState, DeviceStatus};
+use unifree_common::types::MacAddress;
 
 mod adopt;
 
@@ -125,21 +130,31 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn list_devices(state_dir: &str) -> anyhow::Result<()> {
+fn load_devices(state_dir: &str) -> anyhow::Result<HashMap<MacAddress, DeviceState>> {
     let devices_file = std::path::Path::new(state_dir).join("devices.json");
     
     if !devices_file.exists() {
-        println!("No devices found (state file doesn't exist)");
-        return Ok(());
+        return Ok(HashMap::new());
     }
 
     let data = std::fs::read_to_string(&devices_file)?;
-    let devices: std::collections::HashMap<String, serde_json::Value> = 
-        serde_json::from_str(&data)?;
+    let devices: HashMap<MacAddress, DeviceState> = serde_json::from_str(&data)?;
+    Ok(devices)
+}
+
+fn save_devices(state_dir: &str, devices: &HashMap<MacAddress, DeviceState>) -> anyhow::Result<()> {
+    let devices_file = std::path::Path::new(state_dir).join("devices.json");
+    let data = serde_json::to_string_pretty(devices)?;
+    std::fs::write(&devices_file, data)?;
+    Ok(())
+}
+
+fn list_devices(state_dir: &str) -> anyhow::Result<()> {
+    let devices = load_devices(state_dir)?;
 
     if devices.is_empty() {
         println!("No devices found");
-        return Ok(());
+        return Ok(())
     }
 
     println!("{:<20} {:<15} {:<15} {:<12} {:<10}", 
@@ -147,27 +162,11 @@ fn list_devices(state_dir: &str) -> anyhow::Result<()> {
     println!("{}", "-".repeat(75));
 
     for (mac, device) in devices {
-        let ip = device["last_ip"]
-            .as_str()
-            .unwrap_or("-");
-        let model = device["model"]
-            .as_str()
-            .unwrap_or("-");
-        let status = device["status"]
-            .as_str()
-            .unwrap_or("unknown");
+        let ip = device.last_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "-".to_string());
+        let model = device.model.as_deref().unwrap_or("-");
+        let status = device.status.to_string();
         
-        // Check if online based on last_seen
-        let online = if let Some(last_seen) = device["last_seen"].as_str() {
-            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(last_seen) {
-                let age = chrono::Utc::now().signed_duration_since(ts);
-                if age.num_seconds() < 60 { "yes" } else { "no" }
-            } else {
-                "?"
-            }
-        } else {
-            "-"
-        };
+        let online = if device.is_online() { "yes" } else { "no" };
 
         println!("{:<20} {:<15} {:<15} {:<12} {:<10}", 
             mac, ip, model, status, online);
@@ -176,28 +175,14 @@ fn list_devices(state_dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_status(state_dir: &str, mac: &str) -> anyhow::Result<()> {
-    let devices_file = std::path::Path::new(state_dir).join("devices.json");
-    
-    if !devices_file.exists() {
-        println!("No devices found");
-        return Ok(());
-    }
+fn show_status(state_dir: &str, mac_str: &str) -> anyhow::Result<()> {
+    let devices = load_devices(state_dir)?;
+    let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
 
-    let data = std::fs::read_to_string(&devices_file)?;
-    let devices: std::collections::HashMap<String, serde_json::Value> = 
-        serde_json::from_str(&data)?;
-
-    // Normalize MAC for lookup
-    let normalized_mac = mac.replace(":", "").replace("-", "").to_lowercase();
-    let search_mac = format!("{}:{}:{}:{}:{}:{}",
-        &normalized_mac[0..2], &normalized_mac[2..4], &normalized_mac[4..6],
-        &normalized_mac[6..8], &normalized_mac[8..10], &normalized_mac[10..12]);
-
-    if let Some(device) = devices.get(&search_mac) {
+    if let Some(device) = devices.get(&mac) {
         println!("{}", serde_json::to_string_pretty(device)?);
     } else {
-        println!("Device {} not found", mac);
+        println!("Device {} not found", mac_str);
     }
 
     Ok(())
@@ -205,42 +190,32 @@ fn show_status(state_dir: &str, mac: &str) -> anyhow::Result<()> {
 
 async fn adopt_device(
     state_dir: &str, 
-    mac: &str, 
+    mac_str: &str, 
     inform_url: Option<&str>,
     ssh_user: &str,
     ssh_pass: &str,
 ) -> anyhow::Result<()> {
-    let devices_file = std::path::Path::new(state_dir).join("devices.json");
-    
-    if !devices_file.exists() {
+    let mut devices = load_devices(state_dir)?;
+    if devices.is_empty() {
         anyhow::bail!("No devices found - run the daemon first to discover devices");
     }
 
-    let data = std::fs::read_to_string(&devices_file)?;
-    let mut devices: std::collections::HashMap<String, serde_json::Value> = 
-        serde_json::from_str(&data)?;
+    let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
 
-    // Normalize MAC for lookup
-    let normalized_mac = mac.replace(":", "").replace("-", "").to_lowercase();
-    let search_mac = format!("{}:{}:{}:{}:{}:{}",
-        &normalized_mac[0..2], &normalized_mac[2..4], &normalized_mac[4..6],
-        &normalized_mac[6..8], &normalized_mac[8..10], &normalized_mac[10..12]);
+    let device = devices.get_mut(&mac)
+        .ok_or_else(|| anyhow::anyhow!("Device {} not found", mac_str))?;
 
-    let device = devices.get(&search_mac)
-        .ok_or_else(|| anyhow::anyhow!("Device {} not found", mac))?;
-
-    let ip = device["last_ip"]
-        .as_str()
+    let ip = device.last_ip
         .ok_or_else(|| anyhow::anyhow!("Device has no known IP address"))?;
     
-    let ssh_port = device["ssh_port"].as_u64().unwrap_or(22) as u16;
+    let ssh_port = device.ssh_port.unwrap_or(22);
 
     // Determine inform URL - try to auto-detect from daemon or use provided
     let inform_url = match inform_url {
         Some(url) => url.to_string(),
         None => {
             // Try to determine local IP that can reach the device
-            format!("http://{}:8080/inform", get_local_ip_for(ip)?)
+            format!("http://{}:8080/inform", get_local_ip_for(ip.to_string().as_str())?)
         }
     };
 
@@ -249,7 +224,7 @@ async fn adopt_device(
     println!("  SSH: {}@{}:{}", ssh_user, ip, ssh_port);
 
     let result = adopt::perform_adoption(
-        ip.parse()?,
+        ip,
         ssh_port,
         ssh_user,
         ssh_pass,
@@ -262,16 +237,13 @@ async fn adopt_device(
             println!("  Auth key: {}", auth_key);
 
             // Update state
-            if let Some(device) = devices.get_mut(&search_mac) {
-                device["status"] = serde_json::json!("adopted");
-                device["auth_key"] = serde_json::json!(auth_key);
-                device["inform_url"] = serde_json::json!(inform_url);
-                device["adopted_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-            }
+            device.status = DeviceStatus::Adopted;
+            device.auth_key = Some(auth_key);
+            device.inform_url = Some(inform_url.clone());
+            device.adopted_at = Some(chrono::Utc::now());
 
             // Save state
-            let data = serde_json::to_string_pretty(&devices)?;
-            std::fs::write(&devices_file, data)?;
+            save_devices(state_dir, &devices)?;
 
             println!("\nDevice will now inform to {}. Make sure the daemon is running!", inform_url);
         }
@@ -283,30 +255,15 @@ async fn adopt_device(
     Ok(())
 }
 
-fn forget_device(state_dir: &str, mac: &str) -> anyhow::Result<()> {
-    let devices_file = std::path::Path::new(state_dir).join("devices.json");
-    
-    if !devices_file.exists() {
-        println!("No devices found");
-        return Ok(());
-    }
+fn forget_device(state_dir: &str, mac_str: &str) -> anyhow::Result<()> {
+    let mut devices = load_devices(state_dir)?;
+    let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
 
-    let data = std::fs::read_to_string(&devices_file)?;
-    let mut devices: std::collections::HashMap<String, serde_json::Value> = 
-        serde_json::from_str(&data)?;
-
-    // Normalize MAC for lookup
-    let normalized_mac = mac.replace(":", "").replace("-", "").to_lowercase();
-    let search_mac = format!("{}:{}:{}:{}:{}:{}",
-        &normalized_mac[0..2], &normalized_mac[2..4], &normalized_mac[4..6],
-        &normalized_mac[6..8], &normalized_mac[8..10], &normalized_mac[10..12]);
-
-    if devices.remove(&search_mac).is_some() {
-        let data = serde_json::to_string_pretty(&devices)?;
-        std::fs::write(&devices_file, data)?;
-        println!("Device {} forgotten", mac);
+    if devices.remove(&mac).is_some() {
+        save_devices(state_dir, &devices)?;
+        println!("Device {} forgotten", mac_str);
     } else {
-        println!("Device {} not found", mac);
+        println!("Device {} not found", mac_str);
     }
 
     Ok(())

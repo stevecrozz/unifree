@@ -1,92 +1,12 @@
 //! Core types for the UniFi protocol
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::net::IpAddr;
-use std::str::FromStr;
 
-/// MAC address (6 bytes)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct MacAddress(pub [u8; 6]);
+// Re-export common types
+pub use unifree_common::types::{Band, MacAddress, SecurityMode};
 
-impl MacAddress {
-    /// Create from bytes
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() >= 6 {
-            let mut arr = [0u8; 6];
-            arr.copy_from_slice(&bytes[..6]);
-            Some(Self(arr))
-        } else {
-            None
-        }
-    }
-
-    /// Get as bytes
-    pub fn as_bytes(&self) -> &[u8; 6] {
-        &self.0
-    }
-
-    /// Convert to lowercase hex string without separators (e.g., "1c0b8b8e177f")
-    pub fn to_hex_string(&self) -> String {
-        hex::encode(self.0)
-    }
-
-    /// Convert to colon-separated string (e.g., "1c:0b:8b:8e:17:7f")
-    pub fn to_colon_string(&self) -> String {
-        self.0
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(":")
-    }
-}
-
-impl fmt::Debug for MacAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MacAddress({})", self.to_colon_string())
-    }
-}
-
-impl fmt::Display for MacAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_colon_string())
-    }
-}
-
-impl FromStr for MacAddress {
-    type Err = crate::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Support both "1c0b8b8e177f" and "1c:0b:8b:8e:17:7f" formats
-        let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-        if clean.len() != 12 {
-            return Err(crate::Error::InvalidMacAddress(s.to_string()));
-        }
-        let bytes = hex::decode(&clean).map_err(|_| crate::Error::InvalidMacAddress(s.to_string()))?;
-        Ok(Self::from_bytes(&bytes).unwrap())
-    }
-}
-
-impl Serialize for MacAddress {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_colon_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for MacAddress {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-/// Device state in the adoption lifecycle
+/// Device state in the adoption lifecycle (protocol level)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceState {
@@ -379,45 +299,6 @@ impl InformResponse {
             server_time_in_utc: utc_timestamp(),
             params: Default::default(),
         }
-    }
-}
-
-/// Radio band type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Band {
-    #[serde(rename = "2g", alias = "ng")]
-    TwoGhz,
-    #[serde(rename = "5g", alias = "na")]
-    FiveGhz,
-    #[serde(rename = "6g", alias = "6e")]
-    SixGhz,
-}
-
-impl fmt::Display for Band {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Band::TwoGhz => write!(f, "2g"),
-            Band::FiveGhz => write!(f, "5g"),
-            Band::SixGhz => write!(f, "6g"),
-        }
-    }
-}
-
-/// Security mode for wireless networks
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SecurityMode {
-    Open,
-    Wpa2,
-    Wpa3,
-    #[serde(rename = "wpa2-wpa3")]
-    Wpa2Wpa3,
-}
-
-impl Default for SecurityMode {
-    fn default() -> Self {
-        Self::Wpa2Wpa3
     }
 }
 

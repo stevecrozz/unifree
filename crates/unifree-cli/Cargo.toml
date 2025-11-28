@@ -9,7 +9,8 @@ name = "unifree"
 path = "src/main.rs"
 
 [dependencies]
-unifree-protocol.workspace = true
+unifree-common = { path = "../unifree-common" }
+unifree-protocol = { path = "../unifree-protocol" }
 
 # Async runtime
 tokio.workspace = true

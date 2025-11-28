@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+unifree-common = { path = "../unifree-common" }
 # Cryptography
 aes-gcm.workspace = true
 aes.workspace = true
