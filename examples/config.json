@@ -1,4 +1,8 @@
 {
+  "management": {
+    "username": "ubnt",
+    "password": "$6$xyz$whzX6/59L1gVtgIQ2G4ErAg7pgAmeSwxZ71jctlTgErEuoChTwKSp2CJBK2RtCegarzCj87O1zx65PuYqzyYk1"
+  },
   "networks": {
     "home": {
       "ssid": "MyNetwork",

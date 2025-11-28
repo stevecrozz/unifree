@@ -352,8 +352,10 @@ impl ProvisionConfig {
                     },
                     SecurityMode::Wpa2Wpa3 => {
                         lines.push(format!("aaa.{}.wpa=2", w_idx));
-                        lines.push(format!("aaa.{}.wpa.key.1.mgmt=WPA-PSK SAE", w_idx)); // Both
-                        lines.push(format!("aaa.{}.wpa.psk={}", w_idx, net_config.passphrase.as_deref().unwrap_or("")));
+                        lines.push(format!("aaa.{}.wpa.key.1.mgmt=SAE", w_idx)); // SAE covers both in mixed mode for Unifi
+                        let psk = net_config.passphrase.as_deref().unwrap_or("");
+                        lines.push(format!("aaa.{}.wpa.psk={}", w_idx, psk));
+                        lines.push(format!("aaa.{}.wpa.psk={}", w_idx, psk)); // Duplicate PSK required for mixed mode quirk
                         lines.push(format!("aaa.{}.wpa.1.pairwise=CCMP", w_idx));
                         lines.push(format!("aaa.{}.wpa3.support=enabled", w_idx));
                         lines.push(format!("aaa.{}.wpa3.transition=enabled", w_idx));
