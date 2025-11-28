@@ -163,83 +163,237 @@ impl ProvisionConfig {
         }
     }
     
-    /// Generate system_cfg INI for a device
-    pub fn generate_system_cfg(&self, mac: &str) -> String {
+    /// Generate system_ini for a device (modern format for U6/U7)
+    pub fn generate_system_ini(&self, mac: &str) -> String {
         let networks = self.get_networks_for_device(mac);
         let mut lines = Vec::new();
         
-        // Radio configuration (simplified - real config would need model-specific settings)
-        lines.push("# Radio configuration".to_string());
-        lines.push("radio.1.status=enabled".to_string());
-        lines.push("radio.1.channel=auto".to_string());
-        lines.push("radio.1.txpower=auto".to_string());
+        // 1. Core System & Users
+        lines.push("# system".to_string());
+        lines.push("system.analytics.status=disabled".to_string());
+        if let Some(tz) = &self.country_code {
+             // Simplified timezone logic - ideally map country code to TZ
+             // For now hardcode a reasonable default or allow override
+             let tz_str = "CET-1CEST,M3.5.0,M10.5.0/3"; // Default from dump
+             lines.push(format!("system.timezone={}", tz_str));
+             lines.push(format!("locale.timezone={}", tz_str));
+        }
+
+        // Users - typically handled via ProvisionConfig management struct if we expanded it
+        // For now, generate the default admin user from management config
+        lines.push("# users".to_string());
+        lines.push("users.status=enabled".to_string());
         
-        lines.push("radio.2.status=enabled".to_string());
-        lines.push("radio.2.channel=auto".to_string());
-        lines.push("radio.2.txpower=auto".to_string());
+        let username = self.management.username.as_deref().unwrap_or("ubnt");
+        let password = self.management.password.as_deref().unwrap_or("ubnt");
+        // Note: Password should be hashed, but for simplicity/demo we're using plaintext or pre-hashed if provided
+        // In reality, we'd want to check if it looks like a hash ($6$...)
         
-        lines.push("radio.3.status=enabled".to_string());
-        lines.push("radio.3.channel=auto".to_string());
-        lines.push("radio.3.txpower=auto".to_string());
+        lines.push(format!("users.1.name={}", username));
+        // If it starts with $6$, assume it's already a hash. If not, we should probably hash it (but we don't have crypto here easily)
+        // For now, just pass it through. WARNING: Plaintext passwords might not work if device expects hash
+        lines.push(format!("users.1.password={}", password));
+        lines.push("users.1.status=enabled".to_string());
         
-        // AAA (authentication) and wireless config for each network
-        lines.push("\n# Wireless networks".to_string());
+        // 2. Connectivity & Bridge
+        lines.push("# connectivity".to_string());
+        lines.push("connectivity.status=enabled".to_string());
+        lines.push("connectivity.uplink_bridge=br0".to_string());
+        lines.push("connectivity.uplink_eth=eth0".to_string());
+
+        lines.push("# bridge".to_string());
+        lines.push("bridge.status=enabled".to_string());
         
-        let mut aaa_idx = 1;
-        let mut wireless_idx = 1;
+        // Default bridge br0
+        lines.push("bridge.1.devname=br0".to_string());
+        lines.push("bridge.1.fd=1".to_string());
+        lines.push("bridge.1.stp.status=disabled".to_string());
         
-        for (name, network) in &networks {
-            let (auth_mode, cipher) = network.security.to_ini_values();
+        // Bridge ports accumulator
+        let mut br0_ports = vec!["eth0".to_string()];
+        
+        // 3. Network Interfaces (Netconf)
+        lines.push("# netconf".to_string());
+        lines.push("netconf.status=enabled".to_string());
+        
+        // br0 (management interface)
+        lines.push("netconf.1.devname=br0".to_string());
+        lines.push("netconf.1.ip=0.0.0.0".to_string()); // DHCP handles this typically via dhcpc
+        lines.push("netconf.1.status=enabled".to_string());
+        lines.push("netconf.1.up=enabled".to_string());
+        
+        // eth0
+        lines.push("netconf.2.devname=eth0".to_string());
+        lines.push("netconf.2.promisc=enabled".to_string());
+        lines.push("netconf.2.status=enabled".to_string());
+        lines.push("netconf.2.up=enabled".to_string());
+
+        // DHCP Client
+        lines.push("# dhcpc".to_string());
+        lines.push("dhcpc.status=enabled".to_string());
+        lines.push("dhcpc.1.devname=br0".to_string());
+        lines.push("dhcpc.1.status=enabled".to_string());
+
+        // 4. Radio & Wireless Configuration
+        lines.push("# wlans (radio)".to_string());
+        lines.push("radio.status=enabled".to_string());
+        lines.push("aaa.status=enabled".to_string());
+        lines.push("wireless.status=enabled".to_string());
+        
+        // Define physical radios
+        // U7 Pro Max typically has:
+        // radio.1 = 2.4GHz (wifi0)
+        // radio.2 = 5GHz (wifi1)
+        // radio.3 = 6GHz (wifi2)
+        
+        struct PhysRadio {
+            idx: u8,
+            phyname: &'static str,
+            mode: &'static str,
+            band: Band,
+        }
+        
+        let radios = vec![
+            PhysRadio { idx: 1, phyname: "wifi0", mode: "11nght20", band: Band::Band2g },
+            PhysRadio { idx: 2, phyname: "wifi1", mode: "11naht40", band: Band::Band5g },
+            PhysRadio { idx: 3, phyname: "wifi2", mode: "11naht160", band: Band::Band6g },
+        ];
+
+        // Track global unique IDs for aaa/wireless sections
+        let mut wireless_idx_counter = 1;
+        
+        // We also need to track virtual interfaces per radio to assign `virtual.X`
+        let mut radio_vap_counters: HashMap<u8, u8> = HashMap::new();
+
+        for radio in &radios {
+            lines.push(format!("radio.{}.status=enabled", radio.idx));
+            lines.push(format!("radio.{}.phyname={}", radio.idx, radio.phyname));
+            lines.push(format!("radio.{}.mode=master", radio.idx));
+            lines.push(format!("radio.{}.ieee_mode={}", radio.idx, radio.mode));
+            lines.push(format!("radio.{}.channel=auto", radio.idx));
+            lines.push(format!("radio.{}.txpower=auto", radio.idx));
             
-            // Generate config for each band the network is on
-            for band in &network.bands {
-                let radio = match band {
-                    Band::Band2g => "wifi0",
-                    Band::Band5g => "wifi1",
-                    Band::Band6g => "wifi2",
-                };
+            // Find networks for this band
+            let mut radio_networks: Vec<(&String, &NetworkConfig)> = networks.iter()
+                .filter(|(_, n)| n.bands.contains(&radio.band))
+                .collect();
+            
+            // Sort by name for stability
+            radio_networks.sort_by_key(|(name, _)| *name);
+
+            // Assign VAPs
+            for (i, (net_name, net_config)) in radio_networks.iter().enumerate() {
+                // Generate unique devname: wifiXapY
+                // We need a unique 'ap' suffix. The dump uses global unique suffixes?
+                // wifi0ap0, wifi1ap1, wifi2ap3, wifi0ap5...
+                // Let's use a global atomic counter logic for "ap" suffix to keep it simple and unique
+                let ap_suffix = wireless_idx_counter - 1; // 0-based suffix for devname
+                let devname = format!("{}ap{}", radio.phyname, ap_suffix);
                 
-                // AAA entry
-                lines.push(format!("aaa.{}.status=enabled", aaa_idx));
-                lines.push(format!("aaa.{}.essid={}", aaa_idx, network.ssid));
-                lines.push(format!("aaa.{}.hide_ssid={}", aaa_idx, if network.hidden { "true" } else { "false" }));
+                // If it's the first network on this radio, it's the primary devname
+                if i == 0 {
+                    lines.push(format!("radio.{}.devname={}", radio.idx, devname));
+                } else {
+                    // It's a virtual interface
+                    let vap_idx = radio_vap_counters.entry(radio.idx).or_insert(0);
+                    *vap_idx += 1;
+                    lines.push(format!("radio.{}.virtual.{}.status=enabled", radio.idx, vap_idx));
+                    lines.push(format!("radio.{}.virtual.{}.devname={}", radio.idx, vap_idx, devname));
+                    lines.push(format!("radio.{}.virtual.{}.mode=master", radio.idx, vap_idx));
+                }
                 
-                if network.security != SecurityMode::Open {
-                    if let Some(ref psk) = network.passphrase {
-                        lines.push(format!("aaa.{}.wpa.psk={}", aaa_idx, psk));
+                // Add to bridge
+                br0_ports.push(devname.clone());
+                
+                // Wireless Section
+                let w_idx = wireless_idx_counter;
+                lines.push(format!("wireless.{}.devname={}", w_idx, devname));
+                lines.push(format!("wireless.{}.status=enabled", w_idx));
+                lines.push(format!("wireless.{}.ssid={}", w_idx, net_config.ssid));
+                lines.push(format!("wireless.{}.mode=master", w_idx));
+                lines.push(format!("wireless.{}.security=none", w_idx)); // Security logic moved to AAA
+                lines.push(format!("wireless.{}.hide_ssid={}", w_idx, net_config.hidden));
+                
+                // Link to parent wifi physical interface
+                // The dump shows `wireless.1.parent=wifi0`
+                lines.push(format!("wireless.{}.parent={}", w_idx, radio.phyname));
+                
+                // AAA Section (Security)
+                lines.push(format!("aaa.{}.devname={}", w_idx, devname));
+                lines.push(format!("aaa.{}.status=enabled", w_idx));
+                lines.push(format!("aaa.{}.ssid={}", w_idx, net_config.ssid));
+                
+                // Generate a unique ID (random hex) for the network
+                use std::time::{SystemTime, UNIX_EPOCH};
+                // Deterministic ID based on mac + net_name + band to allow stability?
+                // For now, random-ish is fine as long as we don't restart constantly
+                let unique_id = format!("{:x}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() + w_idx as u128);
+                lines.push(format!("aaa.{}.id={}", w_idx, unique_id));
+
+                match net_config.security {
+                    SecurityMode::Open => {
+                        lines.push(format!("aaa.{}.wpa=0", w_idx));
+                    },
+                    SecurityMode::Wpa2 => {
+                        lines.push(format!("aaa.{}.wpa=2", w_idx));
+                        lines.push(format!("aaa.{}.wpa.key.1.mgmt=WPA-PSK", w_idx));
+                        lines.push(format!("aaa.{}.wpa.psk={}", w_idx, net_config.passphrase.as_deref().unwrap_or("")));
+                        lines.push(format!("aaa.{}.wpa.1.pairwise=CCMP", w_idx));
+                    },
+                    SecurityMode::Wpa3 => {
+                        lines.push(format!("aaa.{}.wpa=2", w_idx));
+                        lines.push(format!("aaa.{}.wpa.key.1.mgmt=SAE", w_idx));
+                        lines.push(format!("aaa.{}.wpa.psk={}", w_idx, net_config.passphrase.as_deref().unwrap_or("")));
+                        lines.push(format!("aaa.{}.wpa.1.pairwise=CCMP", w_idx));
+                        lines.push(format!("aaa.{}.wpa3.support=enabled", w_idx));
+                        lines.push(format!("aaa.{}.wpa3.transition=disabled", w_idx)); // WPA3 only
+                        lines.push(format!("aaa.{}.pmf.status=enabled", w_idx));
+                        lines.push(format!("aaa.{}.pmf.mode=2", w_idx)); // Required
+                    },
+                    SecurityMode::Wpa2Wpa3 => {
+                        lines.push(format!("aaa.{}.wpa=2", w_idx));
+                        lines.push(format!("aaa.{}.wpa.key.1.mgmt=WPA-PSK SAE", w_idx)); // Both
+                        lines.push(format!("aaa.{}.wpa.psk={}", w_idx, net_config.passphrase.as_deref().unwrap_or("")));
+                        lines.push(format!("aaa.{}.wpa.1.pairwise=CCMP", w_idx));
+                        lines.push(format!("aaa.{}.wpa3.support=enabled", w_idx));
+                        lines.push(format!("aaa.{}.wpa3.transition=enabled", w_idx));
+                        lines.push(format!("aaa.{}.pmf.status=enabled", w_idx));
+                        lines.push(format!("aaa.{}.pmf.mode=1", w_idx)); // Optional
                     }
-                    lines.push(format!("aaa.{}.wpa.key.1.mgmt={}", aaa_idx, auth_mode));
-                    lines.push(format!("aaa.{}.wpa.key.1.cipher={}", aaa_idx, cipher));
                 }
                 
-                if let Some(vlan) = network.vlan {
-                    lines.push(format!("aaa.{}.vlan={}", aaa_idx, vlan));
-                }
-                
-                if network.guest {
-                    lines.push(format!("aaa.{}.l2_isolation=enabled", aaa_idx));
-                }
-                
-                // Wireless entry
-                lines.push(format!("wireless.{}.status=enabled", wireless_idx));
-                lines.push(format!("wireless.{}.devname={}", wireless_idx, radio));
-                lines.push(format!("wireless.{}.security={}", wireless_idx, aaa_idx));
-                
-                aaa_idx += 1;
-                wireless_idx += 1;
+                wireless_idx_counter += 1;
             }
         }
         
-        // SSH keys
+        // Finalize bridge ports
+        for (i, port) in br0_ports.iter().enumerate() {
+            lines.push(format!("bridge.1.port.{}.devname={}", i + 1, port));
+        }
+        
+        // SSH Keys
         if !self.ssh_keys.is_empty() {
-            lines.push("\n# SSH configuration".to_string());
+            lines.push("# sshd".to_string());
             lines.push("sshd.status=enabled".to_string());
             lines.push("sshd.1.ifname=br0".to_string());
             lines.push("sshd.1.status=enabled".to_string());
-            lines.push("sshd.auth.passwd=enabled".to_string());
+            for (i, key) in self.ssh_keys.iter().enumerate() {
+                let idx = i + 1;
+                lines.push(format!("sshd.auth.key.{}.status=enabled", idx));
+                lines.push(format!("sshd.auth.key.{}.type={}", idx, key.key_type));
+                lines.push(format!("sshd.auth.key.{}.value={}", idx, key.value));
+                if let Some(comment) = &key.comment {
+                    lines.push(format!("sshd.auth.key.{}.comment={}", idx, comment));
+                }
+            }
         }
-        
+
         lines.join("\n")
+    }
+    
+    // Kept for backward compatibility if needed, but redirects to new logic
+    pub fn generate_system_cfg(&self, mac: &str) -> String {
+        self.generate_system_ini(mac)
     }
     
     /// Generate mgmt_cfg INI for a device

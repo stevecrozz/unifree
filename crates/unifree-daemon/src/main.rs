@@ -350,7 +350,7 @@ async fn handle_inform(
         device.status = DeviceStatus::Provisioning;
         
         let mac_str = mac.to_string();
-        let system_cfg = shared.daemon_config.provision.generate_system_cfg(&mac_str);
+        let system_cfg = shared.daemon_config.provision.generate_system_ini(&mac_str);
         
         // Include auth_key and inform_url in mgmt_cfg for adoption
         let auth_key = device.auth_key.as_deref();

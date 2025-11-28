@@ -1,0 +1,26 @@
+---- REQUEST ----
+AuthKey dd7204dc15ca018d5db6359319b8c1cf
+IsAES Y
+IsZLIB Y
+IsGCM Y
+IsSnappy N
+MACAddress 1C0B8B8E177F
+Version 0
+PayloadVersion 1
+IV 0e:54:aa:bc:01:31:31:92:a6:6b:df:92:74:66:01:a9
+
+{"anon_id": "f821cdda-2cb2-48ae-8391-18cea89ce49f", "antenna_table": [{"default": true, "id": 4, "name": "Combined", "wifi0_gain": 4, "wifi1_gain": 6, "wifi2_gain": 6}], "architecture": "armv7l", "board_rev": 5, "bomrev": "113-10353-05", "bomrev_id": "00287105", "boot": {"id": "e4ddb07f-db6e-4760-b409-5a5b28f2f772", "reason": "SOFT_RESTART"}, "bootid": 1, "bootrom_version": "", "cfgversion": "4581c7c6b8251e56", "connect_request_ip": "192.168.178.53", "connect_request_port": "57809", "countrycode_table": [], "default": false, "discovery_response": true, "dualboot": true, "ever_crash": false, "guest_kicks": 0, "guest_token": "BFC659064E916FFEB3D852CABF6EAF9C", "guid": "1cd5b2f7-02c9-49bb-85c8-388b9f68ddfc", "hash_id": "e39118cea89ce49f", "hostname": "U7-Pro-Max", "inform_as_notif": true, "inform_min_interval": 10, "inform_url": "http://192.168.178.28:8081/inform", "ip": "192.168.178.53", "ipv6": ["fdbc:ae5b:aa96:0:1e0b:8bff:fe8e:177f/64", "2003:a:115:3600:1e0b:8bff:fe8e:177f/64", "fe80::1e0b:8bff:fe8e:177f/64"], "isolated": false, "kernel_version": "5.4.213", "last_error_conns": [{"error_reason": 1, "last_error_str": "Unable to resolve (http://unifi:8080/inform)", "last_managed_e_time": 0, "last_managed_s_time": 0, "timestamp": "2025-10-11T00:00:50"}], "locating": false, "mac": "1c:0b:8b:8e:17:7f", "manufacturer_id": 61, "model": "U7PROMAX", "model_display": "U7-Pro-Max", "netmask": "255.255.255.0", "notif_reason": "stun", "reboot_duration": 90, "required_version": "7.0.26", "selfrun_beacon": true, "serial": "1C0B8B8E177F", "state": 2, "supported_afc_regions": [], "sys_error_caps": 0, "sysid": 42646, "time": 1764334079, "timestamp": "2025-11-28T12:47:59", "tm_ready": true, "upgrade_duration": 120, "uptime": 2137, "uptime_str": "35m37s", "version": "8.2.17.17828"}
+
+---- RESPONSE ----
+AuthKey dd7204dc15ca018d5db6359319b8c1cf
+IsAES Y
+IsZLIB N
+IsGCM Y
+IsSnappy N
+MACAddress 0000008E177F
+Version 0
+PayloadVersion 1
+IV ba:89:37:07:20:52:8c:24:c5:ac:38:df:a5:71:79:6e
+
+{"_type":"noop","interval":10,"live_update":false,"include_blocks":[],"server_time_in_utc":"1764334079407"}
+
