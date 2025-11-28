@@ -1,0 +1,41 @@
+{
+  "networks": {
+    "home": {
+      "ssid": "MyNetwork",
+      "passphrase": "supersecret123",
+      "security": "wpa2-wpa3",
+      "bands": ["2g", "5g"],
+      "vlan": null,
+      "hidden": false,
+      "guest": false,
+      "pmf": 1
+    },
+    "guest": {
+      "ssid": "Guest",
+      "passphrase": "guestpass",
+      "security": "wpa2",
+      "bands": ["2g", "5g"],
+      "vlan": 100,
+      "hidden": false,
+      "guest": true,
+      "pmf": 0
+    }
+  },
+  "ssh_keys": [
+    {
+      "key_type": "ssh-ed25519",
+      "value": "AAAAC3NzaC1lZDI1NTE5AAAAIExample...",
+      "comment": "admin@router"
+    }
+  ],
+  "devices": {
+    "1c0b8b8e177f": {
+      "name": "Living Room AP",
+      "networks": {},
+      "disabled_networks": [],
+      "led_enabled": false
+    }
+  },
+  "led_enabled": true,
+  "country_code": "US"
+}

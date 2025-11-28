@@ -1,0 +1,56 @@
+[package]
+name = "unifree-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "unifreed"
+path = "src/main.rs"
+
+[dependencies]
+unifree-protocol.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# SSH
+russh.workspace = true
+ssh-key.workspace = true
+
+# Networking
+socket2.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Config
+toml.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Hex
+hex.workspace = true
+
+# Bytes
+bytes.workspace = true
+
+# CLI args
+clap.workspace = true
+
+# Async trait for SSH handler
+async-trait = "0.1"

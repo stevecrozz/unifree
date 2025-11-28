@@ -1,0 +1,37 @@
+[package]
+name = "unifree-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "unifree"
+path = "src/main.rs"
+
+[dependencies]
+unifree-protocol.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# CLI args
+clap.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Time
+chrono.workspace = true
+
+# SSH for adoption
+russh.workspace = true
+ssh-key.workspace = true
+async-trait = "0.1"

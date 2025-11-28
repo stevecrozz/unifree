@@ -1,0 +1,37 @@
+[package]
+name = "unifree-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Cryptography
+aes-gcm.workspace = true
+aes.workspace = true
+cbc.workspace = true
+cipher.workspace = true
+
+# Compression
+flate2.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Hex encoding
+hex.workspace = true
+
+# Bytes manipulation
+bytes.workspace = true
+
+# Logging
+tracing.workspace = true
+ghash = "0.5.1"
+openssl = "0.10.75"
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
