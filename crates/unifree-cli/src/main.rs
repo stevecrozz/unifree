@@ -1,5 +1,5 @@
 //! unifree - CLI tool for UniFi AP management
-//! 
+//!
 //! This tool communicates with the unifreed daemon to manage UniFi access points.
 
 use clap::{Parser, Subcommand};
@@ -79,6 +79,20 @@ enum Commands {
         #[arg(long)]
         enable: Option<bool>,
     },
+
+    /// Factory reset a device and forget it
+    Reset {
+        /// Device MAC address
+        mac: String,
+
+        /// SSH username (default: ubnt)
+        #[arg(long, default_value = "ubnt")]
+        ssh_user: String,
+        
+        /// SSH password (default: ubnt)
+        #[arg(long, default_value = "ubnt")]
+        ssh_pass: String,
+    },
 }
 
 #[tokio::main]
@@ -125,6 +139,9 @@ async fn main() -> anyhow::Result<()> {
             // TODO: Implement
             println!("Not yet implemented");
         }
+        Commands::Reset { mac, ssh_user, ssh_pass } => {
+            reset_device(&cli.state_dir, &mac, &ssh_user, &ssh_pass).await?;
+        }
     }
 
     Ok(())
@@ -154,7 +171,7 @@ fn list_devices(state_dir: &str) -> anyhow::Result<()> {
 
     if devices.is_empty() {
         println!("No devices found");
-        return Ok(())
+        return Ok(());
     }
 
     println!("{:<20} {:<15} {:<15} {:<12} {:<10}", 
@@ -280,4 +297,44 @@ fn get_local_ip_for(dest_ip: &str) -> anyhow::Result<String> {
     
     let local_addr = socket.local_addr()?;
     Ok(local_addr.ip().to_string())
+}
+
+async fn reset_device(
+    state_dir: &str, 
+    mac_str: &str, 
+    ssh_user: &str,
+    ssh_pass: &str,
+) -> anyhow::Result<()> {
+    let mut devices = load_devices(state_dir)?;
+    let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
+
+    let device = devices.get(&mac)
+        .ok_or_else(|| anyhow::anyhow!("Device {} not found", mac_str))?;
+
+    let ip = device.last_ip
+        .ok_or_else(|| anyhow::anyhow!("Device has no known IP address"))?;
+    
+    let ssh_port = device.ssh_port.unwrap_or(22);
+
+    println!("Factory resetting device {} ({}) ...", mac, ip);
+    println!("  SSH: {}@{}:{}", ssh_user, ip, ssh_port);
+
+    match adopt::perform_reset(ip, ssh_port, ssh_user, ssh_pass).await {
+        Ok(_) => {
+            println!("✓ Reset command sent successfully!");
+            println!("Device is rebooting to factory defaults.");
+            
+            // Forget the device
+            if devices.remove(&mac).is_some() {
+                save_devices(state_dir, &devices)?;
+                println!("Device {} forgotten from controller.", mac_str);
+            }
+        }
+        Err(e) => {
+            println!("✗ Reset failed: {}", e);
+            anyhow::bail!("Failed to reset device");
+        }
+    }
+
+    Ok(())
 }
