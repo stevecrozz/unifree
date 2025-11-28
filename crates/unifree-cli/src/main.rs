@@ -7,6 +7,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use unifree_common::config::ProvisionConfig;
 use unifree_common::state::{DeviceState, DeviceStatus};
 use unifree_common::types::MacAddress;
 
@@ -18,6 +19,10 @@ struct Cli {
     /// State directory (must match daemon)
     #[arg(long, default_value = "/var/lib/unifree")]
     state_dir: String,
+
+    /// Configuration file path (optional)
+    #[arg(long)]
+    config: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -43,13 +48,13 @@ enum Commands {
         #[arg(long)]
         inform_url: Option<String>,
         
-        /// SSH username (default: ubnt)
-        #[arg(long, default_value = "ubnt")]
-        ssh_user: String,
+        /// SSH username (default: ubnt or from config)
+        #[arg(long)]
+        ssh_user: Option<String>,
         
-        /// SSH password (default: ubnt)
-        #[arg(long, default_value = "ubnt")]
-        ssh_pass: String,
+        /// SSH password (default: ubnt or from config)
+        #[arg(long)]
+        ssh_pass: Option<String>,
     },
 
     /// Provision a device with current config
@@ -85,14 +90,46 @@ enum Commands {
         /// Device MAC address
         mac: String,
 
-        /// SSH username (default: ubnt)
-        #[arg(long, default_value = "ubnt")]
-        ssh_user: String,
+        /// SSH username (default: ubnt or from config)
+        #[arg(long)]
+        ssh_user: Option<String>,
         
-        /// SSH password (default: ubnt)
-        #[arg(long, default_value = "ubnt")]
-        ssh_pass: String,
+        /// SSH password (default: ubnt or from config)
+        #[arg(long)]
+        ssh_pass: Option<String>,
     },
+}
+
+struct ResolvedCredentials {
+    user: String,
+    pass: String,
+}
+
+impl ResolvedCredentials {
+    fn resolve(
+        arg_user: Option<String>, 
+        arg_pass: Option<String>, 
+        config: &Option<ProvisionConfig>
+    ) -> Self {
+        let mut user = arg_user;
+        let mut pass = arg_pass;
+
+        // Fallback to config if arguments not present
+        if let Some(cfg) = config {
+            if user.is_none() {
+                user = cfg.management.username.clone();
+            }
+            if pass.is_none() {
+                pass = cfg.management.password.clone();
+            }
+        }
+
+        // Fallback to defaults
+        Self {
+            user: user.unwrap_or_else(|| "ubnt".to_string()),
+            pass: pass.unwrap_or_else(|| "ubnt".to_string()),
+        }
+    }
 }
 
 #[tokio::main]
@@ -106,6 +143,19 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // Load config if specified
+    let config = if let Some(path) = &cli.config {
+        match ProvisionConfig::from_file(path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("Warning: Failed to load config from {}: {}", path, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     match cli.command {
         Commands::List => {
             list_devices(&cli.state_dir)?;
@@ -114,7 +164,8 @@ async fn main() -> anyhow::Result<()> {
             show_status(&cli.state_dir, &mac)?;
         }
         Commands::Adopt { mac, inform_url, ssh_user, ssh_pass } => {
-            adopt_device(&cli.state_dir, &mac, inform_url.as_deref(), &ssh_user, &ssh_pass).await?;
+            let creds = ResolvedCredentials::resolve(ssh_user, ssh_pass, &config);
+            adopt_device(&cli.state_dir, &mac, inform_url.as_deref(), &creds.user, &creds.pass).await?;
         }
         Commands::Provision { mac } => {
             println!("Provisioning device {}...", mac);
@@ -140,7 +191,8 @@ async fn main() -> anyhow::Result<()> {
             println!("Not yet implemented");
         }
         Commands::Reset { mac, ssh_user, ssh_pass } => {
-            reset_device(&cli.state_dir, &mac, &ssh_user, &ssh_pass).await?;
+            let creds = ResolvedCredentials::resolve(ssh_user, ssh_pass, &config);
+            reset_device(&cli.state_dir, &mac, &creds.user, &creds.pass).await?;
         }
     }
 
@@ -171,7 +223,7 @@ fn list_devices(state_dir: &str) -> anyhow::Result<()> {
 
     if devices.is_empty() {
         println!("No devices found");
-        return Ok(());
+        return Ok(())
     }
 
     println!("{:<20} {:<15} {:<15} {:<12} {:<10}", 

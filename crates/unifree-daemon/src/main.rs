@@ -85,13 +85,13 @@ struct Args {
     #[arg(long = "ssh-key-file")]
     ssh_key_files: Vec<String>,
     
-    /// SSH username for adoption
-    #[arg(long, default_value = "ubnt")]
-    ssh_user: String,
+    /// SSH username for adoption (default: ubnt or from config)
+    #[arg(long)]
+    ssh_user: Option<String>,
     
-    /// SSH password for adoption
-    #[arg(long, default_value = "ubnt")]
-    ssh_pass: String,
+    /// SSH password for adoption (default: ubnt or from config)
+    #[arg(long)]
+    ssh_pass: Option<String>,
     
     /// Configuration file (JSON) for networks and device settings
     #[arg(long = "config")]
@@ -190,12 +190,23 @@ async fn main() -> anyhow::Result<()> {
         info!("Auto-adopt enabled: new devices will be automatically adopted");
     }
 
+    // Resolve credentials
+    let ssh_user = args.ssh_user
+        .or_else(|| provision.management.username.clone())
+        .unwrap_or_else(|| "ubnt".to_string());
+
+    let ssh_pass = args.ssh_pass
+        .or_else(|| provision.management.password.clone())
+        .unwrap_or_else(|| "ubnt".to_string());
+
+    info!("Using SSH credentials: user={}", ssh_user);
+
     // Build daemon config
     let daemon_config = DaemonConfig {
         auto_adopt: args.auto_adopt,
         inform_url,
-        ssh_user: args.ssh_user,
-        ssh_pass: args.ssh_pass,
+        ssh_user,
+        ssh_pass,
         provision,
     };
 

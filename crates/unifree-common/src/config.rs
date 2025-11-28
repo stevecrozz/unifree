@@ -14,6 +14,18 @@ pub struct SshKey {
     pub comment: Option<String>,
 }
 
+/// Management credentials configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManagementConfig {
+    /// Username to use for SSH (both adoption and management)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    
+    /// Password to use for SSH
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
 /// WiFi network configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -100,6 +112,10 @@ pub struct ProvisionConfig {
     /// Country code (e.g., "US", "DE")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
+
+    /// Management credentials
+    #[serde(default)]
+    pub management: ManagementConfig,
 }
 
 fn default_true() -> bool { true }
