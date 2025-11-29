@@ -1,3 +1,4 @@
+use pwhash::sha512_crypt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::types::{Band, SecurityMode};
@@ -185,13 +186,15 @@ impl ProvisionConfig {
         lines.push("users.status=enabled".to_string());
         
         let username = self.management.username.as_deref().unwrap_or("ubnt");
-        let password = self.management.password.as_deref().unwrap_or("ubnt");
-        // Note: Password should be hashed, but for simplicity/demo we're using plaintext or pre-hashed if provided
-        // In reality, we'd want to check if it looks like a hash ($6$...)
+        let password_raw = self.management.password.as_deref().unwrap_or("ubnt");
         
+        let password = if password_raw.starts_with("$6$") {
+            password_raw.to_string()
+        } else {
+            sha512_crypt::hash(password_raw).expect("Failed to hash password")
+        };
+
         lines.push(format!("users.1.name={}", username));
-        // If it starts with $6$, assume it's already a hash. If not, we should probably hash it (but we don't have crypto here easily)
-        // For now, just pass it through. WARNING: Plaintext passwords might not work if device expects hash
         lines.push(format!("users.1.password={}", password));
         lines.push("users.1.status=enabled".to_string());
         
@@ -400,7 +403,7 @@ impl ProvisionConfig {
     
     /// Generate mgmt_cfg INI for a device
     pub fn generate_mgmt_cfg(&self, mac: &str) -> String {
-        self.generate_mgmt_cfg_with_auth(mac, None, None)
+        self.generate_mgmt_cfg_with_auth(mac, None, None, "0000000000000000")
     }
     
     /// Generate mgmt_cfg INI for a device with optional auth key and inform URL
@@ -409,17 +412,9 @@ impl ProvisionConfig {
         mac: &str, 
         auth_key: Option<&str>,
         inform_url: Option<&str>,
+        cfgversion: &str,
     ) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        
         let led_enabled = self.get_led_for_device(mac);
-        
-        // Generate a config version hash
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let cfgversion = format!("{:016x}", timestamp);
         
         let mut lines = Vec::new();
         
