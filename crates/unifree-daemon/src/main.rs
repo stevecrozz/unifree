@@ -499,9 +499,11 @@ async fn handle_inform(
     let response_json = serde_json::to_string_pretty(&response).unwrap_or_default();
     debug!("Response JSON:\n{}", response_json);
     
-    // Build encrypted response - match the device's encryption and compression modes
+    // Build encrypted response - match the device's encryption mode
     let use_gcm = packet.flags.aes_gcm;
-    let use_compression = packet.flags.zlib_compressed;
+    // Official controller traces show responses are NOT compressed (IsZLIB N), even if request was.
+    // Enforcing ZLIB caused mcad to fail JSON parsing (decoding 0x9c).
+    let use_compression = false;
     debug!("Responding with crypto: GCM={}, Compressed={}", use_gcm, use_compression);
     
     let builder = InformResponseBuilder::new(mac, key)
