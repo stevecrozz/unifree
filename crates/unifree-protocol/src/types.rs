@@ -233,9 +233,9 @@ pub enum InformResponse {
     },
 }
 
-/// Get current UTC timestamp as string
+/// Get current UTC timestamp as string (milliseconds)
 fn utc_timestamp() -> String {
-    chrono::Utc::now().timestamp().to_string()
+    chrono::Utc::now().timestamp_millis().to_string()
 }
 
 impl InformResponse {
