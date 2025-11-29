@@ -490,10 +490,15 @@ async fn handle_inform(
     let response_json = serde_json::to_string_pretty(&response).unwrap_or_default();
     debug!("Response JSON:\n{}", response_json);
     
-    // Build encrypted response - match the device's encryption mode
+    // Build encrypted response - match the device's encryption and compression modes
     let use_gcm = packet.flags.aes_gcm;
-    debug!("Responding with encryption mode: {}", if use_gcm { "GCM" } else { "CBC" });
-    let builder = InformResponseBuilder::new(mac, key).use_gcm(use_gcm);
+    let use_compression = packet.flags.zlib_compressed;
+    debug!("Responding with crypto: GCM={}, Compressed={}", use_gcm, use_compression);
+    
+    let builder = InformResponseBuilder::new(mac, key)
+        .use_gcm(use_gcm)
+        .use_compression(use_compression);
+        
     let response_bytes = match builder.build(&response) {
         Ok(b) => b,
         Err(e) => {
