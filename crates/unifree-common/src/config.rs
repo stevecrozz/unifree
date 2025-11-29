@@ -169,6 +169,20 @@ impl ProvisionConfig {
         let networks = self.get_networks_for_device(mac);
         let mut lines = Vec::new();
         
+        // 0. Unifi Controller Info
+        lines.push("# unifi".to_string());
+        lines.push("unifi.version=9.5.21".to_string());
+        lines.push("unifi.anonymous_controller_id=d5dcfdb7-f8e2-49e5-92b2-e7723cba1885".to_string());
+        lines.push("unifi.anonymous_site_id=ef8b8b11-ba0f-4e6f-b297-287e2ac93630".to_string());
+        lines.push("unifi.reporterid=d5dcfdb7-f8e2-49e5-92b2-e7723cba1885".to_string());
+        lines.push("unifi.siteid=692911c5ca49482e1a75e911".to_string());
+        lines.push("unifi.idp=enabled".to_string());
+        lines.push("unifi.mcip=239.254.127.63".to_string());
+        // Use a static key for now to match dump, or generate?
+        lines.push("unifi.key=cb1aca606688a98bc453add57acb3589".to_string()); 
+        lines.push("unifi.feature.always_send_crash_logs=enabled".to_string());
+        lines.push("unifi.cfgcap_info=0x7".to_string());
+
         // 1. Core System & Users
         lines.push("# system".to_string());
         lines.push("system.analytics.status=disabled".to_string());
