@@ -147,7 +147,7 @@ impl From<PayloadType> for u8 {
 }
 
 /// Parsed inform request from a device
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InformRequest {
     pub mac: String,
     pub ip: IpAddr,
@@ -213,7 +213,8 @@ pub enum InformResponse {
         system_cfg: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         mgmt_cfg: Option<String>,
-        interval: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        interval: Option<u32>,
         server_time_in_utc: String,
     },
     /// Command execution
@@ -257,7 +258,7 @@ impl InformResponse {
     }
 
     /// Create a configuration update response
-    pub fn set_config(system_cfg: Option<String>, mgmt_cfg: Option<String>, interval: u32) -> Self {
+    pub fn set_config(system_cfg: Option<String>, mgmt_cfg: Option<String>, interval: Option<u32>) -> Self {
         Self::Setparam {
             cfgversion: None,
             system_cfg,
@@ -272,7 +273,7 @@ impl InformResponse {
         cfgversion: Option<String>,
         system_cfg: Option<String>,
         mgmt_cfg: Option<String>,
-        interval: u32,
+        interval: Option<u32>,
     ) -> Self {
         Self::Setparam {
             cfgversion,

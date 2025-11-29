@@ -26,6 +26,7 @@ use unifree_protocol::{
     inform::{InformPacket, InformResponseBuilder},
     InformResponse, MacAddress,
 };
+use sha2::{Sha256, Digest};
 
 mod adopt;
 mod config;
@@ -101,7 +102,9 @@ struct Args {
 /// Shared state for handlers
 struct SharedState {
     app_state: RwLock<AppState>,
-    daemon_config: DaemonConfig,
+    daemon_config: RwLock<DaemonConfig>,
+    log_dir: std::path::PathBuf,
+    config_hash: RwLock<String>,
 }
 
 #[tokio::main]
@@ -201,6 +204,29 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Using SSH credentials: user={}", ssh_user);
 
+    // Create session log directory
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let log_dir = std::path::Path::new("logs").join(&timestamp);
+    std::fs::create_dir_all(&log_dir)?;
+    info!("Session logs will be written to: {}", log_dir.display());
+
+    // Calculate config hash (SHA256 of the ProvisionConfig content)
+    // We hash the raw file content to ensure stability and avoid JSON serialization order issues
+    let config_path = args.config_file.as_deref().unwrap_or("examples/config.json");
+    let config_bytes = match std::fs::read(config_path) {
+        Ok(b) => b,
+        Err(e) => {
+            // If file doesn't exist (using default), serialize the default config
+            warn!("Could not read config file {} for hashing: {}, using default serialization", config_path, e);
+            serde_json::to_vec(&provision).unwrap_or_default()
+        }
+    };
+    
+    let mut hasher = Sha256::new();
+    hasher.update(&config_bytes);
+    let config_hash = hex::encode(&hasher.finalize()[0..8]);
+    info!("Initial config hash: {}", config_hash);
+
     // Build daemon config
     let daemon_config = DaemonConfig {
         auto_adopt: args.auto_adopt,
@@ -213,7 +239,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize state
     let shared_state = Arc::new(SharedState {
         app_state: RwLock::new(AppState::new(&args.state_dir)?),
-        daemon_config,
+        daemon_config: RwLock::new(daemon_config),
+        log_dir,
+        config_hash: RwLock::new(config_hash),
     });
 
     // Build HTTP router
@@ -230,6 +258,14 @@ async fn main() -> anyhow::Result<()> {
             error!("Discovery listener error: {}", e);
         }
     });
+
+    // Start config reloader in background
+    if let Some(config_path) = args.config_file.clone() {
+        let reloader_state = shared_state.clone();
+        tokio::spawn(async move {
+            run_config_reloader(config_path, reloader_state).await;
+        });
+    }
 
     // Start HTTP server
     let listener = tokio::net::TcpListener::bind(&args.http_addr).await?;
@@ -276,9 +312,25 @@ async fn handle_inform(
     debug!("Inform from device: {} (flags: encrypted={}, gcm={}, compressed={})", 
         mac, packet.flags.encrypted, packet.flags.aes_gcm, packet.flags.zlib_compressed);
 
+    // Log raw packet body
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f").to_string();
+    let mac_clean = mac.to_string().replace(":", "");
+    let log_prefix = shared.log_dir.join(format!("{}_{}", timestamp, mac_clean));
+    
+    if let Err(e) = std::fs::write(
+        log_prefix.with_extension("raw.bin"), 
+        &body
+    ) {
+        error!("Failed to write raw inform log: {}", e);
+    }
+
     // Get or create device state
     let mut state_guard = shared.app_state.write().await;
     let device = state_guard.get_or_create_device(mac);
+    
+    // Get config read lock
+    let config_guard = shared.daemon_config.read().await;
+    let current_config_hash = shared.config_hash.read().await.clone();
     
     // Try to decrypt with device key, fall back to default key
     let (key, key_source) = match device.auth_key.as_ref() {
@@ -292,7 +344,18 @@ async fn handle_inform(
 
     // Decrypt and parse the inform payload
     let request = match packet.decrypt_json(&key) {
-        Ok(r) => r,
+        Ok(r) => {
+            // Log decrypted JSON
+            if let Ok(json) = serde_json::to_string_pretty(&r) {
+                if let Err(e) = std::fs::write(
+                    log_prefix.with_extension("decrypted.json"),
+                    json
+                ) {
+                    error!("Failed to write decrypted inform log: {}", e);
+                }
+            }
+            r
+        },
         Err(e) => {
             warn!("Failed to decrypt inform from {}: {}", mac, e);
             // Try with default key if we used a custom key
@@ -301,6 +364,15 @@ async fn handle_inform(
                     Ok(r) => {
                         info!("Device {} appears to have reset, clearing auth key", mac);
                         device.auth_key = None;
+                        
+                        // Log decrypted JSON (retry)
+                        if let Ok(json) = serde_json::to_string_pretty(&r) {
+                            let _ = std::fs::write(
+                                log_prefix.with_extension("decrypted.json"),
+                                json
+                            );
+                        }
+                        
                         r
                     }
                     Err(e2) => {
@@ -337,8 +409,12 @@ async fn handle_inform(
     // If device has our auth_key and is adopted, we should push config (even if request.default is true)
     let has_our_key = device.auth_key.is_some();
     let should_adopt_now = has_our_key && device.status == DeviceStatus::Adopted && request.default;
+    
+    // Use the global config hash as target
+    device.target_cfgversion = Some(current_config_hash.clone());
+    
     let should_update = has_our_key && device.status == DeviceStatus::Adopted && 
-        !request.default && should_push_config(device, &shared.daemon_config);
+        !request.default && should_push_config(device);
     
     let response = if should_adopt_now || should_update {
         // Device needs configuration - either initial adoption or update
@@ -350,22 +426,46 @@ async fn handle_inform(
         device.status = DeviceStatus::Provisioning;
         
         let mac_str = mac.to_string();
-        let system_cfg = shared.daemon_config.provision.generate_system_ini(&mac_str);
+        let system_cfg = config_guard.provision.generate_system_ini(&mac_str);
+        
+        // Use the global config hash
+        let cfgversion = current_config_hash;
         
         // Include auth_key and inform_url in mgmt_cfg for adoption
         let auth_key = device.auth_key.as_deref();
-        let inform_url = Some(shared.daemon_config.inform_url.as_str());
-        let mgmt_cfg = shared.daemon_config.provision.generate_mgmt_cfg_with_auth(
+        let inform_url = Some(config_guard.inform_url.as_str());
+        let mgmt_cfg = config_guard.provision.generate_mgmt_cfg_with_auth(
             &mac_str, 
             auth_key, 
             inform_url,
+            &cfgversion,
         );
         
+        // Log configs to files for debugging
+        if let Err(e) = std::fs::write(
+            log_prefix.with_extension("system.ini"), 
+            &system_cfg
+        ) {
+            error!("Failed to write system.ini log: {}", e);
+        }
+        if let Err(e) = std::fs::write(
+            log_prefix.with_extension("mgmt.ini"), 
+            &mgmt_cfg
+        ) {
+            error!("Failed to write mgmt.ini log: {}", e);
+        }
+
         debug!("system_cfg:\n{}", system_cfg);
         debug!("mgmt_cfg:\n{}", mgmt_cfg);
         
-        // Send both system_cfg and mgmt_cfg
-        InformResponse::set_config(Some(system_cfg), Some(mgmt_cfg), 10)
+        // Send both system_cfg and mgmt_cfg with top-level cfgversion
+        // Pass None for interval to match official controller behavior for setparam
+        InformResponse::set_config_with_version(
+            Some(cfgversion), 
+            Some(system_cfg), 
+            Some(mgmt_cfg), 
+            None
+        )
     } else if !has_our_key && request.default {
         // Device has no auth key and is in default state - truly awaiting adoption
         info!("Device {} is in default state, waiting for adoption (no auth key)", mac);
@@ -406,20 +506,17 @@ async fn handle_inform(
 }
 
 /// Check if we should push config to this device
-fn should_push_config(device: &state::DeviceState, config: &DaemonConfig) -> bool {
-    let has_config = !config.provision.ssh_keys.is_empty() 
-        || !config.provision.networks.is_empty();
-    
-    // Push config if we have config to provision and haven't done so yet
-    if has_config && device.target_cfgversion.is_none() {
-        return true;
-    }
-    
+fn should_push_config(device: &state::DeviceState) -> bool {
     // Push if current config differs from target
     if let (Some(current), Some(target)) = (&device.current_cfgversion, &device.target_cfgversion) {
         if current != target {
             return true;
         }
+    }
+    
+    // Also push if target is set but current is None (first connect)
+    if device.current_cfgversion.is_none() && device.target_cfgversion.is_some() {
+        return true;
     }
     
     false
@@ -465,6 +562,7 @@ async fn run_discovery_listener(
                     // Update device state
                     let should_adopt = {
                         let mut state_guard = shared.app_state.write().await;
+                        let config_guard = shared.daemon_config.read().await;
                         let device = state_guard.get_or_create_device(mac);
                         
                         let was_unknown = device.status == DeviceStatus::Discovered && device.last_seen.is_none();
@@ -478,7 +576,7 @@ async fn run_discovery_listener(
                         device.last_seen = Some(chrono::Utc::now());
                         
                         // Determine if we should auto-adopt (before save to avoid borrow issues)
-                        let adopt = shared.daemon_config.auto_adopt 
+                        let adopt = config_guard.auto_adopt 
                             && is_default 
                             && (was_unknown || current_status == DeviceStatus::Discovered);
                         
@@ -494,13 +592,12 @@ async fn run_discovery_listener(
                     if should_adopt {
                         info!("Auto-adopting device {} at {}", mac, ip);
                         
-                        let config = shared.daemon_config.clone();
                         let state_clone = shared.clone();
                         let mac_clone = mac;
                         
                         // Spawn adoption in background to not block discovery
                         tokio::spawn(async move {
-                            auto_adopt_device(state_clone, mac_clone, ip, ssh_port, &config).await;
+                            auto_adopt_device(state_clone, mac_clone, ip, ssh_port).await;
                         });
                     }
                 }
@@ -512,13 +609,60 @@ async fn run_discovery_listener(
     }
 }
 
+/// Run the config reloader
+async fn run_config_reloader(path: String, shared: Arc<SharedState>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    
+    loop {
+        interval.tick().await;
+        
+        // Attempt to load and hash config
+        match std::fs::read(&path) {
+            Ok(config_bytes) => {
+                // Calculate hash of raw bytes
+                let mut hasher = Sha256::new();
+                hasher.update(&config_bytes);
+                let new_hash = hex::encode(&hasher.finalize()[0..8]);
+                
+                let current_hash = shared.config_hash.read().await.clone();
+                
+                if new_hash != current_hash {
+                    // Try to parse the config to ensure it's valid before applying
+                    match serde_json::from_slice::<ProvisionConfig>(&config_bytes) {
+                        Ok(new_provision) => {
+                            info!("Configuration changed (hash: {} -> {}), reloading...", current_hash, new_hash);
+                            
+                            // Update state
+                            {
+                                let mut config_guard = shared.daemon_config.write().await;
+                                let mut hash_guard = shared.config_hash.write().await;
+                                
+                                // Preserve runtime options
+                                config_guard.provision = new_provision;
+                                *hash_guard = new_hash.clone();
+                            }
+                            
+                            info!("Configuration reloaded successfully");
+                        },
+                        Err(e) => {
+                            error!("Detected config change but failed to parse {}: {}", path, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to read config file {}: {}", path, e);
+            }
+        }
+    }
+}
+
 /// Auto-adopt a device via SSH
 async fn auto_adopt_device(
     shared: Arc<SharedState>,
     mac: MacAddress,
     ip: std::net::IpAddr,
     ssh_port: u16,
-    config: &DaemonConfig,
 ) {
     debug!("auto_adopt_device called for {} at {}", mac, ip);
     
@@ -548,15 +692,20 @@ async fn auto_adopt_device(
     
     info!("Starting SSH adoption for {} at {}:{}", mac, ip, ssh_port);
     
+    let (ssh_user, ssh_pass, inform_url) = {
+        let config = shared.daemon_config.read().await;
+        (config.ssh_user.clone(), config.ssh_pass.clone(), config.inform_url.clone())
+    };
+
     // Perform SSH adoption directly with timeout
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         adopt::perform_ssh_adoption(
             ip,
             ssh_port,
-            &config.ssh_user,
-            &config.ssh_pass,
-            &config.inform_url,
+            &ssh_user,
+            &ssh_pass,
+            &inform_url,
         )
     ).await;
     
@@ -567,7 +716,7 @@ async fn auto_adopt_device(
             Ok(Ok(auth_key)) => {
                 device.status = DeviceStatus::Adopted;
                 device.auth_key = Some(auth_key);
-                device.inform_url = Some(config.inform_url.clone());
+                device.inform_url = Some(inform_url);
                 device.adopted_at = Some(chrono::Utc::now());
                 info!("Auto-adoption of {} successful!", mac);
             }
