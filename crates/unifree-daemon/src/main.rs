@@ -406,29 +406,24 @@ async fn handle_inform(
     device.is_default = request.default;
 
     // Determine response based on device state
-    // If device has our auth_key and is adopted, we should push config (even if request.default is true)
+    // If device has our auth_key and is adopted, we should push config
     let has_our_key = device.auth_key.is_some();
-    let should_adopt_now = has_our_key && device.status == DeviceStatus::Adopted && request.default;
     
     // Use the global config hash as target
     device.target_cfgversion = Some(current_config_hash.clone());
     
-    let should_update = has_our_key && device.status == DeviceStatus::Adopted && 
-        !request.default && should_push_config(device);
+    let should_update = has_our_key && !request.default && should_push_config(device);
     
-    let response = if should_adopt_now || should_update {
-        // Device needs configuration - either initial adoption or update
-        if should_adopt_now {
-            info!("Device {} is ready for adoption, pushing initial configuration", mac);
-        } else {
-            info!("Pushing configuration update to device {}", mac);
-        }
+    let response = if has_our_key && request.default {
+        // Stage 1: Adoption / Management Config
+        // Device is in default state but has our key (we just did SSH adoption)
+        // We MUST send mgmt_cfg to persist the auth key and inform URL.
+        // We MUST NOT send system_cfg or top-level cfgversion yet.
+        info!("Device {} is default, pushing mgmt_cfg to finalize adoption", mac);
         device.status = DeviceStatus::Provisioning;
         
         let mac_str = mac.to_string();
-        let system_cfg = config_guard.provision.generate_system_ini(&mac_str);
-        
-        // Use the global config hash
+        // Use the global config hash for the internal mgmt_cfg version
         let cfgversion = current_config_hash;
         
         // Include auth_key and inform_url in mgmt_cfg for adoption
@@ -441,29 +436,43 @@ async fn handle_inform(
             &cfgversion,
         );
         
-        // Log configs to files for debugging
-        if let Err(e) = std::fs::write(
-            log_prefix.with_extension("system.ini"), 
-            &system_cfg
-        ) {
-            error!("Failed to write system.ini log: {}", e);
-        }
-        if let Err(e) = std::fs::write(
-            log_prefix.with_extension("mgmt.ini"), 
-            &mgmt_cfg
-        ) {
+        // Log mgmt.ini
+        if let Err(e) = std::fs::write(log_prefix.with_extension("mgmt.ini"), &mgmt_cfg) {
             error!("Failed to write mgmt.ini log: {}", e);
         }
-
-        debug!("system_cfg:\n{}", system_cfg);
         debug!("mgmt_cfg:\n{}", mgmt_cfg);
         
-        // Send both system_cfg and mgmt_cfg with top-level cfgversion
-        // Pass None for interval to match official controller behavior for setparam
+        // Send ONLY mgmt_cfg, NO system_cfg, NO top-level cfgversion, NO interval
+        InformResponse::set_config_with_version(
+            None, // No top-level cfgversion for initial mgmt push
+            None, // No system_cfg
+            Some(mgmt_cfg), 
+            None
+        )
+    } else if should_update {
+        // Stage 2: Provisioning / System Config
+        // Device is not default, but config differs
+        info!("Pushing system config update to device {}", mac);
+        device.status = DeviceStatus::Provisioning;
+        
+        let mac_str = mac.to_string();
+        let system_cfg = config_guard.provision.generate_system_ini(&mac_str);
+        
+        // Use the global config hash
+        let cfgversion = current_config_hash;
+        
+        // Log system.ini
+        if let Err(e) = std::fs::write(log_prefix.with_extension("system.ini"), &system_cfg) {
+            error!("Failed to write system.ini log: {}", e);
+        }
+        debug!("system_cfg:\n{}", system_cfg);
+        
+        // Send ONLY system_cfg (with top-level cfgversion), NO mgmt_cfg (unless we want to enforce it always)
+        // Official controller seems to send system_cfg separately after adoption
         InformResponse::set_config_with_version(
             Some(cfgversion), 
             Some(system_cfg), 
-            Some(mgmt_cfg), 
+            None, // No mgmt_cfg needed if just updating system
             None
         )
     } else if !has_our_key && request.default {
