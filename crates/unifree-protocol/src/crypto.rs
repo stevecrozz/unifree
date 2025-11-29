@@ -3,17 +3,12 @@
 //! Supports AES-128-GCM (preferred) and AES-128-CBC encryption,
 //! along with ZLIB compression.
 
-use aes_gcm::{
-    aead::{Aead, KeyInit, consts::U12},
-    aes::Aes128,
-    AesGcm, Nonce,
-};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use std::io::{Read, Write};
 
 use crate::{Error, Result, DEFAULT_KEY};
 
-type Aes128Gcm = AesGcm<Aes128, U12>;
+// type Aes128Gcm = AesGcm<Aes128, U12>; // Removed
 
 /// AES key (16 bytes / 128 bits)
 #[derive(Clone)]
@@ -56,16 +51,45 @@ impl std::fmt::Debug for AesKey {
     }
 }
 
-/// Encrypt data using AES-128-GCM
+/// Encrypt data using AES-128-GCM (legacy wrapper)
 pub fn encrypt_gcm(key: &AesKey, iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes128Gcm::new(key.as_bytes().into());
-    // GCM uses 12-byte nonce, but UniFi protocol uses 16-byte IV
-    // We truncate to 12 bytes as per the protocol behavior
-    let nonce = Nonce::from_slice(&iv[..12]);
+    encrypt_gcm_aad(key, iv, plaintext, &[])
+}
+
+/// Encrypt data using AES-128-GCM with Additional Authenticated Data
+/// 
+/// Uses OpenSSL to handle 16-byte IVs correctly (via GHASH) and support AAD.
+pub fn encrypt_gcm_aad(key: &AesKey, iv: &[u8; 16], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    use openssl::symm::{Cipher, Crypter, Mode};
     
-    cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| Error::Encryption(e.to_string()))
+    let cipher = Cipher::aes_128_gcm();
+    let mut crypter = Crypter::new(cipher, Mode::Encrypt, key.as_bytes(), Some(iv))
+        .map_err(|e| Error::Encryption(e.to_string()))?;
+    
+    // Set AAD
+    if !aad.is_empty() {
+        crypter.aad_update(aad)
+            .map_err(|e| Error::Encryption(e.to_string()))?;
+    }
+    
+    // Encrypt
+    let mut ciphertext = vec![0u8; plaintext.len() + cipher.block_size()];
+    let mut count = crypter.update(plaintext, &mut ciphertext)
+        .map_err(|e| Error::Encryption(e.to_string()))?;
+    count += crypter.finalize(&mut ciphertext[count..])
+        .map_err(|e| Error::Encryption(e.to_string()))?;
+    
+    ciphertext.truncate(count);
+    
+    // Get tag
+    let mut tag = vec![0u8; 16];
+    crypter.get_tag(&mut tag)
+        .map_err(|e| Error::Encryption(e.to_string()))?;
+        
+    // Append tag to ciphertext
+    ciphertext.extend_from_slice(&tag);
+    
+    Ok(ciphertext)
 }
 
 /// Decrypt data using AES-128-GCM (without AAD - simple mode)

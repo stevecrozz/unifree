@@ -196,13 +196,6 @@ impl InformResponseBuilder {
         // Generate IV
         let iv = crypto::generate_iv();
 
-        // Encrypt
-        let encrypted = if self.use_gcm {
-            crypto::encrypt_gcm(&self.key, &iv, &payload)?
-        } else {
-            crypto::encrypt_cbc(&self.key, &iv, &payload)?
-        };
-
         // Build flags
         let flags = InformFlags {
             encrypted: true,
@@ -211,7 +204,33 @@ impl InformResponseBuilder {
             aes_gcm: self.use_gcm,
         };
 
-        // Build packet (header will be generated during encode)
+        // Calculate expected encrypted size to build header for AAD
+        let payload_len = if self.use_gcm {
+            payload.len() + 16 // GCM tag
+        } else {
+            let block_size = 16;
+            let padding_len = block_size - (payload.len() % block_size);
+            payload.len() + padding_len
+        };
+
+        // Construct Header manually for AAD
+        let mut header = [0u8; 40];
+        header[0..4].copy_from_slice(INFORM_MAGIC);
+        header[4..8].copy_from_slice(&0u32.to_be_bytes()); // Version 0
+        header[8..14].copy_from_slice(self.mac.as_bytes());
+        header[14..16].copy_from_slice(&flags.to_raw().to_be_bytes());
+        header[16..32].copy_from_slice(&iv);
+        header[32..36].copy_from_slice(&1u32.to_be_bytes()); // Payload version 1
+        header[36..40].copy_from_slice(&(payload_len as u32).to_be_bytes());
+
+        // Encrypt
+        let encrypted = if self.use_gcm {
+            crypto::encrypt_gcm_aad(&self.key, &iv, &payload, &header)?
+        } else {
+            crypto::encrypt_cbc(&self.key, &iv, &payload)?
+        };
+
+        // Build packet (header will be regenerated during encode, but must match)
         let packet = InformPacket {
             version: 0,
             mac: self.mac,
@@ -219,7 +238,7 @@ impl InformResponseBuilder {
             iv,
             payload_version: 1,
             payload: encrypted,
-            header: [0u8; 40], // Will be overwritten by encode()
+            header, // Stored for completeness, though encode() regenerates it
         };
 
         Ok(packet.encode())
