@@ -440,15 +440,9 @@ impl ProvisionConfig {
         lines.push("selfrun_guest_mode=pass".to_string());
         lines.push("use_aes_gcm=true".to_string());
         
-        // Auth key for device authentication
-        if let Some(key) = auth_key {
-            lines.push(format!("authkey={}", key));
-        }
-        
-        // Inform URL
-        if let Some(url) = inform_url {
-            lines.push(format!("inform_url={}", url));
-        }
+        // Note: authkey and inform_url are NOT included in mgmt_cfg in official traces.
+        // They are handled by the adoption process (set-adopt).
+        // Including them might cause mcad to crash or malfunction.
         
         // SSH keys in mgmt_cfg
         for (i, key) in self.ssh_keys.iter().enumerate() {
