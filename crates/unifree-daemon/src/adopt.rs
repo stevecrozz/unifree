@@ -13,18 +13,17 @@ use tracing::{info, warn, error, debug};
 use crate::state::{AppState, DeviceStatus};
 use unifree_protocol::MacAddress;
 
-/// Simple SSH adoption - returns auth key on success
+/// Simple SSH adoption - executes set-adopt with provided key
 pub async fn perform_ssh_adoption(
     ip: IpAddr,
     port: u16,
     user: &str,
     pass: &str,
     inform_url: &str,
-) -> anyhow::Result<String> {
+    auth_key: &str,
+) -> anyhow::Result<()> {
     use russh::*;
     use std::sync::Arc as StdArc;
-
-    let auth_key = generate_auth_key();
 
     debug!("Connecting to {}:{} as {}", ip, port, user);
 
@@ -100,13 +99,13 @@ pub async fn perform_ssh_adoption(
     let _ = session.disconnect(Disconnect::ByApplication, "", "").await;
 
     match exit_code {
-        Some(0) => Ok(auth_key),
+        Some(0) => Ok(()),
         Some(code) => anyhow::bail!("set-adopt exited with code {}: {}", code, output.trim()),
         None => {
             if output.to_lowercase().contains("error") {
                 anyhow::bail!("set-adopt may have failed: {}", output.trim());
             }
-            Ok(auth_key)
+            Ok(())
         }
     }
 }

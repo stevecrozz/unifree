@@ -702,6 +702,19 @@ async fn auto_adopt_device(
         (config.ssh_user.clone(), config.ssh_pass.clone(), config.inform_url.clone())
     };
 
+    // Generate key and update state BEFORE SSH to handle race condition
+    // (Device informs immediately after set-adopt, potentially before SSH returns)
+    let auth_key = adopt::generate_auth_key();
+    {
+        let mut state_guard = shared.app_state.write().await;
+        if let Some(device) = state_guard.devices.get_mut(&mac) {
+            device.status = DeviceStatus::Adopting;
+            device.auth_key = Some(auth_key.clone());
+            device.inform_url = Some(inform_url.clone());
+            let _ = state_guard.save();
+        }
+    }
+
     // Perform SSH adoption directly with timeout
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -711,6 +724,7 @@ async fn auto_adopt_device(
             &ssh_user,
             &ssh_pass,
             &inform_url,
+            &auth_key,
         )
     ).await;
     
@@ -718,19 +732,20 @@ async fn auto_adopt_device(
     let mut state_guard = shared.app_state.write().await;
     if let Some(device) = state_guard.devices.get_mut(&mac) {
         match result {
-            Ok(Ok(auth_key)) => {
+            Ok(Ok(())) => {
                 device.status = DeviceStatus::Adopted;
-                device.auth_key = Some(auth_key);
-                device.inform_url = Some(inform_url);
+                // auth_key is already set
                 device.adopted_at = Some(chrono::Utc::now());
                 info!("Auto-adoption of {} successful!", mac);
             }
             Ok(Err(e)) => {
                 device.status = DeviceStatus::Discovered;
+                device.auth_key = None; // Clear invalid key
                 warn!("Auto-adoption of {} failed: {}", mac, e);
             }
             Err(_) => {
                 device.status = DeviceStatus::Discovered;
+                device.auth_key = None; // Clear invalid key
                 warn!("Auto-adoption of {} timed out after 30s", mac);
             }
         }
