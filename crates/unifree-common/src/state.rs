@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use chrono::{DateTime, Utc};
-use crate::types::MacAddress;
+use crate::types::{MacAddress, RadioTableEntry};
 
 /// State of a single device
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,6 +60,10 @@ pub struct DeviceState {
     /// When the device was adopted
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adopted_at: Option<DateTime<Utc>>,
+
+    /// Radio table reported by the device
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub radio_table: Vec<RadioTableEntry>,
 }
 
 impl DeviceState {

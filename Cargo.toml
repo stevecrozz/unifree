@@ -36,18 +36,18 @@ cipher = "0.4"
 flate2 = "1"
 
 # SSH (pure Rust)
-russh = "0.48"
+russh = "0.54"
 ssh-key = "0.6"  # Required by russh's Handler API
 
 # Networking
-socket2 = "0.5"
+socket2 = "0.6"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Config
-toml = "0.8"
+toml = "0.9"
 
 # Error handling
 thiserror = "2"

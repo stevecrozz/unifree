@@ -140,3 +140,50 @@ impl SecurityMode {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadioTableEntry {
+    pub radio: String,
+    pub name: String,
+    pub channel: Option<serde_json::Value>,
+    pub tx_power_mode: Option<String>,
+    pub ht: Option<serde_json::Value>,
+    pub vht: Option<serde_json::Value>,
+    pub he: Option<serde_json::Value>,
+    pub eht: Option<serde_json::Value>,
+    #[serde(alias = "builtin_ant_gain")]
+    pub antenna_gain: Option<serde_json::Value>,
+    #[serde(rename = "max_tx_power")]
+    pub max_tx_power: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntennaTableEntry {
+    #[serde(rename = "wifi0_gain")]
+    pub wifi0_gain: Option<u8>,
+    #[serde(rename = "wifi1_gain")]
+    pub wifi1_gain: Option<u8>,
+    #[serde(rename = "wifi2_gain")]
+    pub wifi2_gain: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub mac: String,
+    #[serde(rename = "x_authkey")]
+    pub auth_key: Option<String>,
+    pub cfgversion: String,
+    #[serde(rename = "syslog_key")]
+    pub syslog_remote_key: Option<String>,
+    #[serde(rename = "inform_url")]
+    pub inform_url: Option<String>,
+    #[serde(rename = "inform_ip")]
+    pub inform_ip: Option<String>,
+    #[serde(rename = "x_vwirekey")]
+    pub vwire_key: Option<String>,
+    #[serde(default)]
+    pub antenna_table: Vec<AntennaTableEntry>,
+    #[serde(default)]
+    pub radio_table: Vec<RadioTableEntry>,
+}
+

@@ -16,6 +16,7 @@ pub use types::*;
 
 /// Default encryption key used before device adoption
 pub const DEFAULT_KEY: &str = "ba86f2bbe107c7c57eb5f2690775c712";
+pub const ADOPT_CFG_VERSION: &str = "0123456789abcdef";
 
 /// Protocol magic bytes for inform packets
 pub const INFORM_MAGIC: &[u8; 4] = b"TNBU";

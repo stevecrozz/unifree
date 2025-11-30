@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub use unifree_common::state::DeviceState;
 use unifree_common::types::MacAddress;
@@ -36,34 +36,18 @@ impl AppState {
         Ok(Self { state_dir, devices })
     }
 
-    /// Get or create a device entry
-    pub fn get_or_create_device(&mut self, mac: MacAddress) -> &mut DeviceState {
-        self.devices.entry(mac).or_insert_with(|| DeviceState {
-            mac,
-            ..Default::default()
-        })
+            /// Get or create a device entry                                                               
+            pub fn get_or_create_device(&mut self, mac: MacAddress) -> &mut DeviceState {                  
+                self.devices.entry(mac).or_insert_with(|| DeviceState {                                    
+                    mac,                                                                                   
+                    ..Default::default()                                                                   
+                })                                                                                         
+            }                                                                                              
+                                                                                                           
+            /// Save state to disk                                                                         
+            pub fn save(&self) -> anyhow::Result<()> {            let devices_file = self.state_dir.join("devices.json");                                    
+            let data = serde_json::to_string_pretty(&self.devices)?;                                   
+            fs::write(devices_file, data)?;                                                            
+            Ok(())                                                                                     
+        }
     }
-
-    /// Get a device by MAC
-    pub fn get_device(&self, mac: &MacAddress) -> Option<&DeviceState> {
-        self.devices.get(mac)
-    }
-
-    /// Get a mutable device by MAC
-    pub fn get_device_mut(&mut self, mac: &MacAddress) -> Option<&mut DeviceState> {
-        self.devices.get_mut(mac)
-    }
-
-    /// Save state to disk
-    pub fn save(&self) -> anyhow::Result<()> {
-        let devices_file = self.state_dir.join("devices.json");
-        let data = serde_json::to_string_pretty(&self.devices)?;
-        fs::write(devices_file, data)?;
-        Ok(())
-    }
-
-    /// Get the state directory path
-    pub fn state_dir(&self) -> &Path {
-        &self.state_dir
-    }
-}

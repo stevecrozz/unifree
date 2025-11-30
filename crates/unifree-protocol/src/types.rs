@@ -174,6 +174,12 @@ pub struct InformRequest {
     pub locating: bool,
     #[serde(default)]
     pub fingerprint_req: bool,
+    #[serde(default)]
+    pub inform_as_notif: bool,
+    #[serde(default)]
+    pub notif_reason: Option<String>,
+    #[serde(default)]
+    pub notif_payload: Option<serde_json::Value>,
     
     // Optional detailed info
     #[serde(default)]
@@ -234,6 +240,7 @@ pub enum InformResponse {
 }
 
 /// Get current UTC timestamp as string (milliseconds)
+#[inline]
 fn utc_timestamp() -> String {
     chrono::Utc::now().timestamp_millis().to_string()
 }
