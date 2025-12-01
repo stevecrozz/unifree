@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 // Re-export common types
-pub use unifree_common::types::{Band, MacAddress, SecurityMode};
+pub use unifree_types::{Band, MacAddress, SecurityMode};
 
 /// Device state in the adoption lifecycle (protocol level)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,7 +180,7 @@ pub struct InformRequest {
     pub notif_reason: Option<String>,
     #[serde(default)]
     pub notif_payload: Option<serde_json::Value>,
-    
+
     // Optional detailed info
     #[serde(default)]
     pub radio_table: Vec<serde_json::Value>,
@@ -188,13 +188,13 @@ pub struct InformRequest {
     pub vap_table: Vec<serde_json::Value>,
     #[serde(default)]
     pub if_table: Vec<serde_json::Value>,
-    
+
     // System stats
     #[serde(default, rename = "sys_stats")]
     pub sys_stats: Option<serde_json::Value>,
     #[serde(default, rename = "system-stats")]
     pub system_stats: Option<serde_json::Value>,
-    
+
     // Catch all other fields
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -265,7 +265,11 @@ impl InformResponse {
     }
 
     /// Create a configuration update response
-    pub fn set_config(system_cfg: Option<String>, mgmt_cfg: Option<String>, interval: Option<u32>) -> Self {
+    pub fn set_config(
+        system_cfg: Option<String>,
+        mgmt_cfg: Option<String>,
+        interval: Option<u32>,
+    ) -> Self {
         Self::Setparam {
             cfgversion: None,
             system_cfg,
@@ -303,7 +307,12 @@ impl InformResponse {
     /// Create a locate (LED flash) command
     pub fn locate(enabled: bool) -> Self {
         Self::Cmd {
-            cmd: if enabled { "set-locate" } else { "unset-locate" }.to_string(),
+            cmd: if enabled {
+                "set-locate"
+            } else {
+                "unset-locate"
+            }
+            .to_string(),
             server_time_in_utc: utc_timestamp(),
             params: Default::default(),
         }
@@ -319,7 +328,7 @@ mod tests {
         let mac1: MacAddress = "1c0b8b8e177f".parse().unwrap();
         let mac2: MacAddress = "1c:0b:8b:8e:17:7f".parse().unwrap();
         let mac3: MacAddress = "1C:0B:8B:8E:17:7F".parse().unwrap();
-        
+
         assert_eq!(mac1, mac2);
         assert_eq!(mac2, mac3);
         assert_eq!(mac1.to_hex_string(), "1c0b8b8e177f");

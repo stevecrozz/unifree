@@ -3,13 +3,14 @@
 //! This tool communicates with the unifreed daemon to manage UniFi access points.
 
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::collections::HashMap;
 use std::str::FromStr;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use unifree_common::config::ProvisionConfig;
-use unifree_common::state::{DeviceState, DeviceStatus};
-use unifree_common::types::MacAddress;
+use reqwest::Client;
+use unifree_config::config::ProvisionConfig;
+use unifree_state::{DeviceState, DeviceStatus};
+use unifree_types::MacAddress;
 
 mod adopt;
 
@@ -23,6 +24,10 @@ struct Cli {
     /// Configuration file path (optional)
     #[arg(long)]
     config: Option<String>,
+
+    /// Daemon API URL
+    #[arg(long, default_value = "http://localhost:8080")]
+    daemon_url: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -47,11 +52,11 @@ enum Commands {
         /// Inform URL for the device to connect to
         #[arg(long)]
         inform_url: Option<String>,
-        
+
         /// SSH username (default: ubnt or from config)
         #[arg(long)]
         ssh_user: Option<String>,
-        
+
         /// SSH password (default: ubnt or from config)
         #[arg(long)]
         ssh_pass: Option<String>,
@@ -63,10 +68,26 @@ enum Commands {
         mac: String,
     },
 
-    /// Forget a device
-    Forget {
+    /// Upgrade device firmware
+    Upgrade {
         /// Device MAC address
         mac: String,
+        /// Custom firmware URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Custom version string (required if url is provided)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Abandon (forget) a device
+    Abandon {
+        /// Device MAC address
+        mac: String,
+
+        /// Factory reset the device before forgetting
+        #[arg(long)]
+        factory_reset: bool,
     },
 
     /// Reboot a device
@@ -84,20 +105,6 @@ enum Commands {
         #[arg(long)]
         enable: Option<bool>,
     },
-
-    /// Factory reset a device and forget it
-    Reset {
-        /// Device MAC address
-        mac: String,
-
-        /// SSH username (default: ubnt or from config)
-        #[arg(long)]
-        ssh_user: Option<String>,
-        
-        /// SSH password (default: ubnt or from config)
-        #[arg(long)]
-        ssh_pass: Option<String>,
-    },
 }
 
 struct ResolvedCredentials {
@@ -107,14 +114,13 @@ struct ResolvedCredentials {
 
 impl ResolvedCredentials {
     fn resolve(
-        arg_user: Option<String>, 
-        arg_pass: Option<String>, 
-        config: &Option<ProvisionConfig>
+        arg_user: Option<String>,
+        arg_pass: Option<String>,
+        config: &Option<ProvisionConfig>,
     ) -> Self {
         let mut user = arg_user;
         let mut pass = arg_pass;
 
-        // Fallback to config if arguments not present
         if let Some(cfg) = config {
             if user.is_none() {
                 user = cfg.management.username.clone();
@@ -124,7 +130,6 @@ impl ResolvedCredentials {
             }
         }
 
-        // Fallback to defaults
         Self {
             user: user.unwrap_or_else(|| "ubnt".to_string()),
             pass: pass.unwrap_or_else(|| "ubnt".to_string()),
@@ -132,18 +137,30 @@ impl ResolvedCredentials {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct DeviceListResponse {
+    devices: Vec<DeviceState>,
+}
+
+#[derive(serde::Serialize)]
+struct UpgradeRequest {
+    url: Option<String>,
+    version: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "unifree=info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "unifree=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     let cli = Cli::parse();
+    let client = Client::new();
 
-    // Load config if specified
     let config = if let Some(path) = &cli.config {
         match ProvisionConfig::from_file(path) {
             Ok(c) => Some(c),
@@ -158,26 +175,124 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::List => {
-            list_devices(&cli.state_dir)?;
+            let url = format!("{}/api/devices", cli.daemon_url);
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let list: DeviceListResponse = resp.json().await?;
+                        print_device_list(&list.devices);
+                    } else {
+                        eprintln!("Daemon returned error: {}", resp.status());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to contact daemon at {}: {}", cli.daemon_url, e);
+                    eprintln!("Trying local state file fallback...");
+                    list_devices_local(&cli.state_dir)?;
+                }
+            }
         }
         Commands::Status { mac } => {
             show_status(&cli.state_dir, &mac)?;
         }
-        Commands::Adopt { mac, inform_url, ssh_user, ssh_pass } => {
+        Commands::Adopt {
+            mac,
+            inform_url,
+            ssh_user,
+            ssh_pass,
+        } => {
             let creds = ResolvedCredentials::resolve(ssh_user, ssh_pass, &config);
-            adopt_device(&cli.state_dir, &mac, inform_url.as_deref(), &creds.user, &creds.pass).await?;
+
+            // Try API adoption first
+            let api_url = format!("{}/api/devices/{}/adopt", cli.daemon_url, mac);
+            match client.post(&api_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    println!("Adoption triggered via Daemon API. Check logs for progress.");
+                }
+                Ok(resp) => {
+                    eprintln!(
+                        "Daemon API returned error: {}. Falling back to local adoption...",
+                        resp.status()
+                    );
+                    adopt_device_local(
+                        &cli.state_dir,
+                        &mac,
+                        inform_url.as_deref(),
+                        &creds.user,
+                        &creds.pass,
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to contact daemon: {}. Falling back to local adoption...",
+                        e
+                    );
+                    adopt_device_local(
+                        &cli.state_dir,
+                        &mac,
+                        inform_url.as_deref(),
+                        &creds.user,
+                        &creds.pass,
+                    )
+                    .await?;
+                }
+            }
+        }
+        Commands::Upgrade { mac, url, version } => {
+            let api_url = format!("{}/api/devices/{}/upgrade", cli.daemon_url, mac);
+            let payload = UpgradeRequest { url, version };
+            let resp = client.post(&api_url).json(&payload).send().await?;
+            if resp.status().is_success() {
+                println!("Upgrade command sent for {}", mac);
+            } else {
+                eprintln!("Failed to send upgrade command: {}", resp.status());
+            }
         }
         Commands::Provision { mac } => {
             println!("Provisioning device {}...", mac);
-            // TODO: Implement
-            println!("Not yet implemented");
+            println!("Not yet implemented via CLI");
         }
-        Commands::Forget { mac } => {
-            forget_device(&cli.state_dir, &mac)?;
+        Commands::Abandon { mac, factory_reset } => {
+            let mut api_url = format!("{}/api/devices/{}", cli.daemon_url, mac);
+            if factory_reset {
+                api_url.push_str("?reset=true");
+            }
+
+            match client.delete(&api_url).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        println!("Device {} abandoned (reset={}) via API", mac, factory_reset);
+                    } else {
+                        eprintln!("Failed to abandon device via API: {}", resp.status());
+                        if factory_reset {
+                            eprintln!("Attempting local reset/abandon fallback...");
+                            let creds = ResolvedCredentials::resolve(None, None, &config);
+                            reset_and_forget_local(&cli.state_dir, &mac, &creds.user, &creds.pass)
+                                .await?;
+                        } else {
+                            eprintln!("Attempting local forget fallback...");
+                            forget_device_local(&cli.state_dir, &mac)?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to contact daemon: {}, falling back to local file",
+                        e
+                    );
+                    if factory_reset {
+                        let creds = ResolvedCredentials::resolve(None, None, &config);
+                        reset_and_forget_local(&cli.state_dir, &mac, &creds.user, &creds.pass)
+                            .await?;
+                    } else {
+                        forget_device_local(&cli.state_dir, &mac)?;
+                    }
+                }
+            }
         }
         Commands::Reboot { mac } => {
             println!("Rebooting device {}...", mac);
-            // TODO: Implement
             println!("Not yet implemented");
         }
         Commands::Locate { mac, enable } => {
@@ -187,21 +302,16 @@ async fn main() -> anyhow::Result<()> {
                 None => "toggling",
             };
             println!("{} locating for device {}...", action, mac);
-            // TODO: Implement
             println!("Not yet implemented");
-        }
-        Commands::Reset { mac, ssh_user, ssh_pass } => {
-            let creds = ResolvedCredentials::resolve(ssh_user, ssh_pass, &config);
-            reset_device(&cli.state_dir, &mac, &creds.user, &creds.pass).await?;
         }
     }
 
     Ok(())
 }
 
-fn load_devices(state_dir: &str) -> anyhow::Result<HashMap<MacAddress, DeviceState>> {
+fn load_devices_local(state_dir: &str) -> anyhow::Result<HashMap<MacAddress, DeviceState>> {
     let devices_file = std::path::Path::new(state_dir).join("devices.json");
-    
+
     if !devices_file.exists() {
         return Ok(HashMap::new());
     }
@@ -211,41 +321,55 @@ fn load_devices(state_dir: &str) -> anyhow::Result<HashMap<MacAddress, DeviceSta
     Ok(devices)
 }
 
-fn save_devices(state_dir: &str, devices: &HashMap<MacAddress, DeviceState>) -> anyhow::Result<()> {
+fn save_devices_local(
+    state_dir: &str,
+    devices: &HashMap<MacAddress, DeviceState>,
+) -> anyhow::Result<()> {
     let devices_file = std::path::Path::new(state_dir).join("devices.json");
     let data = serde_json::to_string_pretty(devices)?;
     std::fs::write(&devices_file, data)?;
     Ok(())
 }
 
-fn list_devices(state_dir: &str) -> anyhow::Result<()> {
-    let devices = load_devices(state_dir)?;
-
+fn print_device_list(devices: &[DeviceState]) {
     if devices.is_empty() {
         println!("No devices found");
-        return Ok(())
+        return;
     }
 
-    println!("{:<20} {:<15} {:<15} {:<12} {:<10}", 
-        "MAC", "IP", "MODEL", "STATUS", "ONLINE");
-    println!("{}", "-".repeat(75));
+    println!(
+        "{:<20} {:<15} {:<15} {:<15} {:<12} {:<10}",
+        "MAC", "IP", "MODEL", "VERSION", "STATUS", "ONLINE"
+    );
+    println!("{}", "-".repeat(90));
 
-    for (mac, device) in devices {
-        let ip = device.last_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "-".to_string());
+    for device in devices {
+        let ip = device
+            .last_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "-".to_string());
         let model = device.model.as_deref().unwrap_or("-");
+        let version = device.version.as_deref().unwrap_or("-");
         let status = device.status.to_string();
-        
+
         let online = if device.is_online() { "yes" } else { "no" };
 
-        println!("{:<20} {:<15} {:<15} {:<12} {:<10}", 
-            mac, ip, model, status, online);
+        println!(
+            "{:<20} {:<15} {:<15} {:<15} {:<12} {:<10}",
+            device.mac, ip, model, version, status, online
+        );
     }
+}
 
+fn list_devices_local(state_dir: &str) -> anyhow::Result<()> {
+    let devices_map = load_devices_local(state_dir)?;
+    let devices: Vec<DeviceState> = devices_map.values().cloned().collect();
+    print_device_list(&devices);
     Ok(())
 }
 
 fn show_status(state_dir: &str, mac_str: &str) -> anyhow::Result<()> {
-    let devices = load_devices(state_dir)?;
+    let devices = load_devices_local(state_dir)?;
     let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(device) = devices.get(&mac) {
@@ -257,64 +381,58 @@ fn show_status(state_dir: &str, mac_str: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn adopt_device(
-    state_dir: &str, 
-    mac_str: &str, 
+async fn adopt_device_local(
+    state_dir: &str,
+    mac_str: &str,
     inform_url: Option<&str>,
     ssh_user: &str,
     ssh_pass: &str,
 ) -> anyhow::Result<()> {
-    let mut devices = load_devices(state_dir)?;
-    if devices.is_empty() {
-        anyhow::bail!("No devices found - run the daemon first to discover devices");
-    }
+    let mut devices = load_devices_local(state_dir)?;
 
     let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
+    let device = devices.entry(mac).or_default();
+    device.mac = mac;
 
-    let device = devices.get_mut(&mac)
-        .ok_or_else(|| anyhow::anyhow!("Device {} not found", mac_str))?;
+    let ip = device.last_ip.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Device {} has no known IP address in state. Cannot adopt locally.",
+            mac_str
+        )
+    })?;
 
-    let ip = device.last_ip
-        .ok_or_else(|| anyhow::anyhow!("Device has no known IP address"))?;
-    
     let ssh_port = device.ssh_port.unwrap_or(22);
 
-    // Determine inform URL - try to auto-detect from daemon or use provided
     let inform_url = match inform_url {
         Some(url) => url.to_string(),
-        None => {
-            // Try to determine local IP that can reach the device
-            format!("http://{}:8080/inform", get_local_ip_for(ip.to_string().as_str())?)
-        }
+        None => format!(
+            "http://{}:8080/inform",
+            get_local_ip_for(ip.to_string().as_str())?
+        ),
     };
 
-    println!("Adopting device {} ({}) ...", mac, ip);
+    println!("Adopting device {} ({}) locally...", mac, ip);
     println!("  Inform URL: {}", inform_url);
     println!("  SSH: {}@{}:{}", ssh_user, ip, ssh_port);
 
-    let result = adopt::perform_adoption(
-        ip,
-        ssh_port,
-        ssh_user,
-        ssh_pass,
-        &inform_url,
-    ).await;
+    let result = adopt::perform_adoption(ip, ssh_port, ssh_user, ssh_pass, &inform_url).await;
 
     match result {
         Ok(auth_key) => {
-            println!("✓ Adoption successful!");
+            println!("✓ Local adoption successful!");
             println!("  Auth key: {}", auth_key);
 
-            // Update state
             device.status = DeviceStatus::Adopted;
             device.auth_key = Some(auth_key);
             device.inform_url = Some(inform_url.clone());
             device.adopted_at = Some(chrono::Utc::now());
 
-            // Save state
-            save_devices(state_dir, &devices)?;
+            save_devices_local(state_dir, &devices)?;
 
-            println!("\nDevice will now inform to {}. Make sure the daemon is running!", inform_url);
+            println!(
+                "\nDevice will now inform to {}. Make sure the daemon is running!",
+                inform_url
+            );
         }
         Err(e) => {
             println!("✗ Adoption failed: {}", e);
@@ -324,62 +442,57 @@ async fn adopt_device(
     Ok(())
 }
 
-fn forget_device(state_dir: &str, mac_str: &str) -> anyhow::Result<()> {
-    let mut devices = load_devices(state_dir)?;
+fn forget_device_local(state_dir: &str, mac_str: &str) -> anyhow::Result<()> {
+    let mut devices = load_devices_local(state_dir)?;
     let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
 
     if devices.remove(&mac).is_some() {
-        save_devices(state_dir, &devices)?;
-        println!("Device {} forgotten", mac_str);
+        save_devices_local(state_dir, &devices)?;
+        println!("Device {} forgotten (local)", mac_str);
     } else {
-        println!("Device {} not found", mac_str);
+        println!("Device {} not found (local)", mac_str);
     }
 
     Ok(())
 }
 
-/// Try to determine the local IP address that can reach a given destination
 fn get_local_ip_for(dest_ip: &str) -> anyhow::Result<String> {
     use std::net::UdpSocket;
-    
-    // Create a UDP socket and "connect" to the destination
-    // This doesn't actually send anything but lets us find the local IP
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.connect(format!("{}:10001", dest_ip))?;
-    
     let local_addr = socket.local_addr()?;
     Ok(local_addr.ip().to_string())
 }
 
-async fn reset_device(
-    state_dir: &str, 
-    mac_str: &str, 
+async fn reset_and_forget_local(
+    state_dir: &str,
+    mac_str: &str,
     ssh_user: &str,
     ssh_pass: &str,
 ) -> anyhow::Result<()> {
-    let mut devices = load_devices(state_dir)?;
+    let mut devices = load_devices_local(state_dir)?;
     let mac = MacAddress::from_str(mac_str).map_err(|e| anyhow::anyhow!(e))?;
 
-    let device = devices.get(&mac)
+    let device = devices
+        .get(&mac)
         .ok_or_else(|| anyhow::anyhow!("Device {} not found", mac_str))?;
 
-    let ip = device.last_ip
+    let ip = device
+        .last_ip
         .ok_or_else(|| anyhow::anyhow!("Device has no known IP address"))?;
-    
+
     let ssh_port = device.ssh_port.unwrap_or(22);
 
-    println!("Factory resetting device {} ({}) ...", mac, ip);
-    println!("  SSH: {}@{}:{}", ssh_user, ip, ssh_port);
+    println!("Factory resetting device {} ({}) locally...", mac, ip);
 
     match adopt::perform_reset(ip, ssh_port, ssh_user, ssh_pass).await {
         Ok(_) => {
             println!("✓ Reset command sent successfully!");
             println!("Device is rebooting to factory defaults.");
-            
-            // Forget the device
+
             if devices.remove(&mac).is_some() {
-                save_devices(state_dir, &devices)?;
-                println!("Device {} forgotten from controller.", mac_str);
+                save_devices_local(state_dir, &devices)?;
+                println!("Device {} forgotten from local state.", mac_str);
             }
         }
         Err(e) => {

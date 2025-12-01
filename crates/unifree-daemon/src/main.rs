@@ -10,26 +10,31 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use clap::Parser;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use sha2::{Sha256, Digest};
 
 mod adopt;
 mod api;
 mod config;
 mod discovery;
+mod firmware;
 mod state;
 mod tasks;
+mod telemetry;
 mod utils;
 
-use crate::api::inform::{handle_inform};
+use crate::api::devices::{adopt_device, forget_device, list_devices, upgrade_device};
+use crate::api::inform::handle_inform;
 use crate::api::inform::health_check;
+use crate::api::metrics::{metrics_handler, telemetry_json};
 use crate::discovery::run_discovery_listener;
+use crate::firmware::FirmwareManager;
 use crate::tasks::{run_config_reloader, run_stale_adoption_cleanup};
 use crate::utils::get_local_ip;
 use config::ProvisionConfig;
@@ -40,6 +45,8 @@ use state::AppState;
 pub struct DaemonConfig {
     /// Auto-adopt new devices on discovery
     pub auto_adopt: bool,
+    /// Auto-update device firmware when available
+    pub auto_update: bool,
     /// Inform URL to advertise to devices
     pub inform_url: String,
     /// SSH credentials for adoption
@@ -67,31 +74,35 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
-    
+
     /// Auto-adopt new devices when discovered
     #[arg(long)]
     auto_adopt: bool,
-    
+
+    /// Auto-update device firmware when available
+    #[arg(long)]
+    auto_update: bool,
+
     /// Inform URL for devices (auto-detected if not specified)
     #[arg(long)]
     inform_url: Option<String>,
-    
+
     /// SSH public keys to provision (can be specified multiple times)
     #[arg(long = "ssh-key")]
     ssh_keys: Vec<String>,
-    
+
     /// File containing SSH public keys (one per line)
     #[arg(long = "ssh-key-file")]
     ssh_key_files: Vec<String>,
-    
+
     /// SSH username for adoption (default: ubnt or from config)
     #[arg(long)]
     ssh_user: Option<String>,
-    
+
     /// SSH password for adoption (default: ubnt or from config)
     #[arg(long)]
     ssh_pass: Option<String>,
-    
+
     /// Configuration file (JSON) for networks and device settings
     #[arg(long = "config")]
     config_file: Option<String>,
@@ -103,6 +114,8 @@ pub struct SharedState {
     pub daemon_config: RwLock<DaemonConfig>,
     pub log_dir: std::path::PathBuf,
     pub config_hash: RwLock<String>,
+    pub firmware_manager: FirmwareManager,
+    pub telemetry: telemetry::TelemetryStore,
 }
 
 #[tokio::main]
@@ -111,8 +124,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize logging
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| format!("unifreed={},unifree_protocol=debug", args.log_level).into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!("unifreed={},unifree_protocol=debug", args.log_level).into()
+            }),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -135,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ProvisionConfig::default()
     };
-    
+
     // Add SSH keys from command line
     for key_str in &args.ssh_keys {
         if let Some(key) = crate::config::models::parse_ssh_pubkey(key_str) {
@@ -144,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
             warn!("Invalid SSH key format: {}", key_str);
         }
     }
-    
+
     // Add SSH keys from files
     for file_path in &args.ssh_key_files {
         match std::fs::read_to_string(file_path) {
@@ -166,37 +182,49 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-    
+
     // Log what we have
     if !provision.ssh_keys.is_empty() {
-        info!("Loaded {} SSH key(s) for provisioning", provision.ssh_keys.len());
+        info!(
+            "Loaded {} SSH key(s) for provisioning",
+            provision.ssh_keys.len()
+        );
     }
     if !provision.networks.is_empty() {
         info!("Loaded {} default network(s)", provision.networks.len());
         for (name, net) in &provision.networks {
-            info!("  - {}: SSID={}, security={:?}, bands={:?}", 
-                name, net.ssid, net.security, net.bands);
+            info!(
+                "  - {}: SSID={}, security={:?}, bands={:?}",
+                name, net.ssid, net.security, net.bands
+            );
         }
     }
-    
+
     // Determine inform URL
     let inform_url = args.inform_url.unwrap_or_else(|| {
-        format!("http://{}:{}/inform", 
+        format!(
+            "http://{}:{}/inform",
             get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
-            args.http_addr.port())
+            args.http_addr.port()
+        )
     });
     info!("Inform URL: {}", inform_url);
-    
+
     if args.auto_adopt {
         info!("Auto-adopt enabled: new devices will be automatically adopted");
     }
+    if args.auto_update {
+        info!("Auto-update enabled: devices will be automatically upgraded to latest firmware");
+    }
 
     // Resolve credentials
-    let ssh_user = args.ssh_user
+    let ssh_user = args
+        .ssh_user
         .or_else(|| provision.management.username.clone())
         .unwrap_or_else(|| "ubnt".to_string());
 
-    let ssh_pass = args.ssh_pass
+    let ssh_pass = args
+        .ssh_pass
         .or_else(|| provision.management.password.clone())
         .unwrap_or_else(|| "ubnt".to_string());
 
@@ -204,22 +232,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Create session log directory
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let log_dir = std::path::Path::new("logs").join(&timestamp);
+    let log_dir = std::path::Path::new(&args.state_dir)
+        .join("logs")
+        .join(&timestamp);
     std::fs::create_dir_all(&log_dir)?;
     info!("Session logs will be written to: {}", log_dir.display());
 
     // Calculate config hash (SHA256 of the ProvisionConfig content)
     // We hash the raw file content to ensure stability and avoid JSON serialization order issues
-    let config_path = args.config_file.as_deref().unwrap_or("examples/config.json");
+    let config_path = args
+        .config_file
+        .as_deref()
+        .unwrap_or("examples/config.json");
     let config_bytes = match std::fs::read(config_path) {
         Ok(b) => b,
         Err(e) => {
             // If file doesn't exist (using default), serialize the default config
-            warn!("Could not read config file {} for hashing: {}, using default serialization", config_path, e);
+            warn!(
+                "Could not read config file {} for hashing: {}, using default serialization",
+                config_path, e
+            );
             serde_json::to_vec(&provision).unwrap_or_default()
         }
     };
-    
+
     let mut hasher = Sha256::new();
     hasher.update(&config_bytes);
     let config_hash = hex::encode(&hasher.finalize()[0..8]);
@@ -228,11 +264,37 @@ async fn main() -> anyhow::Result<()> {
     // Build daemon config
     let daemon_config = DaemonConfig {
         auto_adopt: args.auto_adopt,
+        auto_update: args.auto_update,
         inform_url,
         ssh_user,
         ssh_pass,
         provision,
     };
+
+    // Initialize firmware manager
+    let firmware_manager = FirmwareManager::new();
+
+    // Start firmware update fetcher task
+    let fw_mgr_clone = firmware_manager.clone();
+    tokio::spawn(async move {
+        // Initial fetch
+        if let Err(e) = fw_mgr_clone.fetch_updates().await {
+            warn!("Failed to fetch initial firmware updates: {}", e);
+        } else {
+            info!("Initial firmware update check complete");
+        }
+
+        // Loop every hour
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            if let Err(e) = fw_mgr_clone.fetch_updates().await {
+                warn!("Failed to refresh firmware updates: {}", e);
+            }
+        }
+    });
+
+    let telemetry = telemetry::TelemetryStore::new();
 
     // Initialize state
     let shared_state = Arc::new(SharedState {
@@ -240,12 +302,20 @@ async fn main() -> anyhow::Result<()> {
         daemon_config: RwLock::new(daemon_config),
         log_dir,
         config_hash: RwLock::new(config_hash),
+        firmware_manager,
+        telemetry: telemetry.clone(),
     });
 
     // Build HTTP router
     let app = Router::new()
         .route("/inform", post(handle_inform))
         .route("/health", get(health_check))
+        .route("/api/devices", get(list_devices))
+        .route("/api/devices/{mac}/upgrade", post(upgrade_device))
+        .route("/api/devices/{mac}/adopt", post(adopt_device))
+        .route("/api/devices/{mac}", delete(forget_device))
+        .route("/metrics", get(metrics_handler))
+        .route("/telemetry", get(telemetry_json))
         .with_state(shared_state.clone());
 
     // Start discovery listener in background
@@ -274,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
     // Start HTTP server
     let listener = tokio::net::TcpListener::bind(&args.http_addr).await?;
     info!("Listening on {}", args.http_addr);
-    
+
     axum::serve(listener, app).await?;
 
     Ok(())

@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use tracing::{info, error, warn};
-use sha2::{Sha256, Digest};
 use hex;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
-use crate::{SharedState};
 use crate::config::ProvisionConfig;
-use crate::state::DeviceStatus;
+use crate::state::{persist_snapshot, DeviceStatus};
+use crate::SharedState;
 
 /// Run the config reloader
 pub async fn run_config_reloader(path: String, shared: Arc<SharedState>) {
@@ -28,7 +28,10 @@ pub async fn run_config_reloader(path: String, shared: Arc<SharedState>) {
                     // Try to parse the config to ensure it's valid before applying
                     match serde_json::from_slice::<ProvisionConfig>(&config_bytes) {
                         Ok(new_provision) => {
-                            info!("Configuration changed (hash: {} -> {}), reloading...", current_hash, new_hash);
+                            info!(
+                                "Configuration changed (hash: {} -> {}), reloading...",
+                                current_hash, new_hash
+                            );
 
                             // Update state
                             {
@@ -41,7 +44,7 @@ pub async fn run_config_reloader(path: String, shared: Arc<SharedState>) {
                             }
 
                             info!("Configuration reloaded successfully");
-                        },
+                        }
                         Err(e) => {
                             error!("Detected config change but failed to parse {}: {}", path, e);
                         }
@@ -74,7 +77,7 @@ pub async fn run_stale_adoption_cleanup(shared: Arc<SharedState>) {
                     // We use last_seen as a proxy for "activity"
                     if let Some(last_seen) = device.last_seen {
                         if (now - last_seen).num_minutes() > 5 {
-                             devices_to_reset.push(mac.clone());
+                            devices_to_reset.push(mac.clone());
                         }
                     } else {
                         // If never seen (unlikely if adopting, but strictly speaking)
@@ -85,20 +88,24 @@ pub async fn run_stale_adoption_cleanup(shared: Arc<SharedState>) {
         }
 
         if !devices_to_reset.is_empty() {
-             let mut state_guard = shared.app_state.write().await;
-             for mac in devices_to_reset {
-                 if let Some(device) = state_guard.devices.get_mut(&mac) {
-                     // Double check status hasn't changed
-                     if device.status == DeviceStatus::Adopting {
-                         warn!("Resetting stale adoption state for {}", mac);
-                         device.status = DeviceStatus::Discovered;
-                         device.auth_key = None;
-                     }
-                 }
-             }
-             if let Err(e) = state_guard.save() {
-                 error!("Failed to save state during stale cleanup: {}", e);
-             }
+            let snapshot = {
+                let mut state_guard = shared.app_state.write().await;
+                for mac in devices_to_reset {
+                    if let Some(device) = state_guard.devices.get_mut(&mac) {
+                        // Double check status hasn't changed
+                        if device.status == DeviceStatus::Adopting {
+                            warn!("Resetting stale adoption state for {}", mac);
+                            device.status = DeviceStatus::Discovered;
+                            device.auth_key = None;
+                        }
+                    }
+                }
+                state_guard.snapshot()
+            };
+
+            if let Err(e) = persist_snapshot(snapshot).await {
+                error!("Failed to persist state during stale cleanup: {}", e);
+            }
         }
     }
 }

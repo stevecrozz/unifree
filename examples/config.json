@@ -42,9 +42,8 @@
       "name": "U7ProMax",
       "networks": {},
       "disabled_networks": [],
-      "led_enabled": true
+      "led": true
     }
   },
-  "led_enabled": true,
   "country_code": "DE"
 }

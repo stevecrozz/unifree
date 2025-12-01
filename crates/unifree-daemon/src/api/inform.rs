@@ -1,24 +1,21 @@
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::StatusCode,
-};
+use axum::{body::Bytes, extract::State, http::StatusCode};
+use chrono;
 use std::sync::Arc;
-use tracing::{info, warn, error, debug};
-use rand::Rng;
-use chrono; // Added missing chrono import
-
+use tracing::{debug, error, info, warn}; // Added missing chrono import
 
 use crate::{
-    state::{self, DeviceStatus},
+    state::{self, persist_snapshot, DeviceStatus},
+    telemetry::{self, DeviceTelemetry},
     SharedState,
 };
+use serde_json::Value;
 use unifree_protocol::{
     crypto::AesKey,
     inform::{InformPacket, InformResponseBuilder},
-    InformResponse,
+    InformRequest, InformResponse,
 };
-use hex; // Import hex for the config_hash
+use unifree_state::FirmwareUpdateInfo;
+use unifree_types::RadioTableEntry;
 
 /// Health check endpoint
 pub async fn health_check() -> &'static str {
@@ -42,8 +39,10 @@ pub async fn handle_inform(
     };
 
     let mac = packet.mac;
-    debug!("Inform from device: {} (flags: encrypted={}, gcm={}, compressed={})",
-        mac, packet.flags.encrypted, packet.flags.aes_gcm, packet.flags.zlib_compressed);
+    debug!(
+        "Inform from device: {} (flags: encrypted={}, gcm={}, compressed={})",
+        mac, packet.flags.encrypted, packet.flags.aes_gcm, packet.flags.zlib_compressed
+    );
 
     // Log raw packet body
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f").to_string();
@@ -53,57 +52,61 @@ pub async fn handle_inform(
     let log_prefix_clone = log_prefix.clone();
     let body_clone = body.clone();
     tokio::spawn(async move {
-        if let Err(e) = tokio::fs::write(
-            log_prefix_clone.with_extension("raw.bin"),
-            &body_clone
-        ).await {
+        if let Err(e) =
+            tokio::fs::write(log_prefix_clone.with_extension("raw.bin"), &body_clone).await
+        {
             error!("Failed to write raw inform log: {}", e);
         }
     });
 
-    // Get or create device state
-    let mut state_guard = shared.app_state.write().await;
-    let device = state_guard.get_or_create_device(mac);
+    // Ensure we have a device entry and capture its auth key without holding the lock
+    let device_auth_key = {
+        let mut state_guard = shared.app_state.write().await;
+        let device = state_guard.get_or_create_device(mac);
+        device.auth_key.clone()
+    };
 
-    // Get config read lock
-    let config_guard = shared.daemon_config.read().await;
     let current_config_hash = shared.config_hash.read().await.clone();
 
     // Try to decrypt with device key, fall back to default key
-    let (key, key_source) = match device.auth_key.as_ref() {
+    let (key, key_source) = match device_auth_key.as_ref() {
         Some(k) => match AesKey::from_hex(k) {
             Ok(key) => (key, format!("device key {}", &k[..8])),
-            Err(_) => (AesKey::default_key(), "default (hex parse failed)".to_string()),
+            Err(_) => (
+                AesKey::default_key(),
+                "default (hex parse failed)".to_string(),
+            ),
         },
         None => (AesKey::default_key(), "default".to_string()),
     };
     debug!("Using {} for decryption", key_source);
 
     // Decrypt and parse the inform payload
+    let mut clear_device_key = false;
     let request = match packet.decrypt_json(&key) {
         Ok(r) => {
             // Log decrypted JSON
             if let Ok(json) = serde_json::to_string_pretty(&r) {
                 let log_prefix_clone = log_prefix.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = tokio::fs::write(
-                        log_prefix_clone.with_extension("decrypted.json"),
-                        json
-                    ).await {
+                    if let Err(e) =
+                        tokio::fs::write(log_prefix_clone.with_extension("decrypted.json"), json)
+                            .await
+                    {
                         error!("Failed to write decrypted inform log: {}", e);
                     }
                 });
             }
             r
-        },
+        }
         Err(e) => {
             warn!("Failed to decrypt inform from {}: {}", mac, e);
             // Try with default key if we used a custom key
-            if device.auth_key.is_some() {
+            if device_auth_key.is_some() {
                 match packet.decrypt_json(&AesKey::default_key()) {
                     Ok(r) => {
                         info!("Device {} appears to have reset, clearing auth key", mac);
-                        device.auth_key = None;
+                        clear_device_key = true;
 
                         // Log decrypted JSON (retry)
                         if let Ok(json) = serde_json::to_string_pretty(&r) {
@@ -111,8 +114,9 @@ pub async fn handle_inform(
                             tokio::spawn(async move {
                                 let _ = tokio::fs::write(
                                     log_prefix_clone.with_extension("decrypted.json"),
-                                    json
-                                ).await;
+                                    json,
+                                )
+                                .await;
                             });
                         }
 
@@ -129,15 +133,30 @@ pub async fn handle_inform(
         }
     };
 
+    let telemetry_snapshot = build_device_telemetry(&request);
+    let telemetry_store = shared.telemetry.clone();
+    let telemetry_mac = mac.to_string();
+    tokio::spawn(async move {
+        telemetry_store
+            .update(&telemetry_mac, telemetry_snapshot)
+            .await;
+    });
+
     info!(
         "Inform from {} ({}): model={}, version={}, state={}, cfgversion={}",
-        mac,
-        request.hostname,
-        request.model,
-        request.version,
-        request.state,
-        request.cfgversion
+        mac, request.hostname, request.model, request.version, request.state, request.cfgversion
     );
+
+    // Re-acquire state for the rest of processing
+    let mut state_guard = shared.app_state.write().await;
+    let device = state_guard.get_or_create_device(mac);
+
+    if clear_device_key {
+        device.auth_key = None;
+    }
+
+    // Get config read lock
+    let config_guard = shared.daemon_config.read().await;
 
     // Update device info
     device.model = Some(request.model.clone());
@@ -152,7 +171,7 @@ pub async fn handle_inform(
     if !request.radio_table.is_empty() {
         let mut parsed_radios = Vec::new();
         for radio_value in &request.radio_table {
-            match serde_json::from_value::<unifree_common::types::RadioTableEntry>(radio_value.clone()) {
+            match serde_json::from_value::<RadioTableEntry>(radio_value.clone()) {
                 Ok(entry) => parsed_radios.push(entry),
                 Err(e) => warn!("Failed to parse radio table entry: {}", e),
             }
@@ -160,15 +179,129 @@ pub async fn handle_inform(
         device.radio_table = parsed_radios;
     }
 
-    // Determine response based on device state
-    // If device has our auth_key and is adopted, we should push config
-    let has_our_key = device.auth_key.is_some();
-
     // Determine encryption/compression settings early for early returns
     let use_gcm = packet.flags.aes_gcm;
     // Official controller traces show responses are NOT compressed (IsZLIB N), even if request was.
     // Enforcing ZLIB caused mcad to fail JSON parsing (decoding 0x9c).
     let use_compression = false;
+
+    // --- Firmware Upgrade Logic ---
+    let is_upgrading = request.state == 4; // 4 = Upgrading
+    if is_upgrading {
+        if device.status != DeviceStatus::Upgrading {
+            info!("Device {} reported it is upgrading", mac);
+            device.status = DeviceStatus::Upgrading;
+        }
+        // Just return noop while upgrading
+        return Ok(Bytes::from(
+            InformResponseBuilder::new(mac, key)
+                .use_gcm(use_gcm)
+                .use_compression(use_compression)
+                .build(&InformResponse::noop(10))
+                .unwrap(),
+        ));
+    } else if device.status == DeviceStatus::Upgrading {
+        // Was upgrading, now not upgrading (and not 4). Failed or done?
+        if let Some(target) = &device.target_firmware {
+            if device.version.as_deref() == Some(&target.version) {
+                info!("Device {} finished upgrade to {}", mac, target.version);
+                device.target_firmware = None;
+                device.status = DeviceStatus::Adopted;
+            } else {
+                warn!(
+                    "Device {} exited upgrade state but version mismatch: got {}, expected {}",
+                    mac,
+                    device.version.as_deref().unwrap_or("?"),
+                    target.version
+                );
+                // Clear target to prevent loop
+                device.target_firmware = None;
+                device.status = DeviceStatus::Adopted;
+            }
+        } else {
+            device.status = DeviceStatus::Adopted;
+        }
+    }
+
+    // Check for pending upgrade or auto-update
+    // Only check if we are fully adopted/provisioned to avoid interrupting adoption
+    let can_upgrade = device.auth_key.is_some() && !request.default;
+
+    let pending_upgrade = if can_upgrade {
+        if let Some(target) = &device.target_firmware {
+            if device.version.as_deref() != Some(&target.version) {
+                Some(target.clone())
+            } else {
+                device.target_firmware = None;
+                None
+            }
+        } else if config_guard.auto_update {
+            // Auto-update check
+            if let Some(model) = &device.model {
+                let current = device.version.as_deref().unwrap_or("0.0.0");
+                match shared
+                    .firmware_manager
+                    .get_update_for_device(model, current)
+                    .await
+                {
+                    Some(update) => {
+                        info!(
+                            "Auto-update: Found new firmware for {}: {} -> {}",
+                            mac, current, update.version
+                        );
+                        let target = FirmwareUpdateInfo {
+                            version: update.version,
+                            url: update.url,
+                            md5: update.md5,
+                        };
+                        device.target_firmware = Some(target.clone());
+                        Some(target)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(upgrade) = pending_upgrade {
+        info!(
+            "Sending firmware upgrade command to {}: {} ({})",
+            mac, upgrade.version, upgrade.url
+        );
+        device.status = DeviceStatus::Upgrading;
+
+        let response = InformResponse::Upgrade {
+            url: upgrade.url,
+            server_time_in_utc: chrono::Utc::now().timestamp_millis().to_string(),
+            md5: upgrade.md5,
+        };
+
+        drop(config_guard);
+        let snapshot = state_guard.snapshot();
+        drop(state_guard);
+        if let Err(e) = persist_snapshot(snapshot).await {
+            error!("Failed to persist upgrade state for {}: {}", mac, e);
+        }
+
+        return Ok(Bytes::from(
+            InformResponseBuilder::new(mac, key)
+                .use_gcm(use_gcm)
+                .use_compression(use_compression)
+                .build(&response)
+                .unwrap(),
+        ));
+    }
+    // ----------------------------
+
+    // Determine response based on device state
+    // If device has our auth_key and is adopted, we should push config
+    let has_our_key = device.auth_key.is_some();
 
     // Use the global config hash as target
     device.target_cfgversion = Some(current_config_hash.clone());
@@ -176,10 +309,8 @@ pub async fn handle_inform(
     // Check if this is an event notification rather than a full inform
     if request.inform_as_notif {
         info!(
-            "Received notification from {}: reason={:?} payload={:?}", 
-            mac, 
-            request.notif_reason,
-            request.notif_payload
+            "Received notification from {}: reason={:?} payload={:?}",
+            mac, request.notif_reason, request.notif_payload
         );
         // Immediate response for notifications
         return Ok(Bytes::from(
@@ -187,16 +318,20 @@ pub async fn handle_inform(
                 .use_gcm(use_gcm)
                 .use_compression(use_compression)
                 .build(&InformResponse::noop(0))
-                .unwrap()
+                .unwrap(),
         ));
     }
 
-    let should_update = has_our_key && !request.default && should_push_config(device, &request.cfgversion);
+    let should_update =
+        has_our_key && !request.default && should_push_config(device, &request.cfgversion);
 
     let response = if has_our_key && request.default {
         // Stage 1: Device is in default state but has our key (we just did SSH adoption)
         // We MUST send mgmt_cfg to persist the auth key and inform URL.
-        info!("Device {} is default, pushing mgmt_cfg to finalize adoption", mac);
+        info!(
+            "Device {} is default, pushing mgmt_cfg to finalize adoption",
+            mac
+        );
         device.status = DeviceStatus::Provisioning;
 
         let mac_str = mac.to_string();
@@ -217,7 +352,9 @@ pub async fn handle_inform(
         let mgmt_cfg_clone = mgmt_cfg.clone();
         let log_prefix_clone = log_prefix.clone();
         tokio::spawn(async move {
-            if let Err(e) = tokio::fs::write(log_prefix_clone.with_extension("mgmt.ini"), &mgmt_cfg_clone).await {
+            if let Err(e) =
+                tokio::fs::write(log_prefix_clone.with_extension("mgmt.ini"), &mgmt_cfg_clone).await
+            {
                 error!("Failed to write mgmt.ini log: {}", e);
             }
         });
@@ -228,13 +365,16 @@ pub async fn handle_inform(
             None, // No top-level cfgversion for initial mgmt push
             None, // No system_cfg
             Some(mgmt_cfg),
-            None
+            None,
         )
     } else if should_update {
         // Stage 2: Provisioning / System Config
-        
+
         if device.radio_table.is_empty() {
-            info!("Device {} needs config update but has not reported radio table yet. Sending noop.", mac);
+            info!(
+                "Device {} needs config update but has not reported radio table yet. Sending noop.",
+                mac
+            );
             InformResponse::noop(10)
         } else {
             // Device is not default, but config differs
@@ -251,7 +391,12 @@ pub async fn handle_inform(
             let system_cfg_clone = system_cfg.clone();
             let log_prefix_clone = log_prefix.clone();
             tokio::spawn(async move {
-                if let Err(e) = tokio::fs::write(log_prefix_clone.with_extension("system.ini"), &system_cfg_clone).await {
+                if let Err(e) = tokio::fs::write(
+                    log_prefix_clone.with_extension("system.ini"),
+                    &system_cfg_clone,
+                )
+                .await
+                {
                     error!("Failed to write system.ini log: {}", e);
                 }
             });
@@ -272,7 +417,12 @@ pub async fn handle_inform(
             let mgmt_cfg_clone_2 = mgmt_cfg.clone();
             let log_prefix_clone_2 = log_prefix.clone();
             tokio::spawn(async move {
-                if let Err(e) = tokio::fs::write(log_prefix_clone_2.with_extension("mgmt_stage2.ini"), &mgmt_cfg_clone_2).await {
+                if let Err(e) = tokio::fs::write(
+                    log_prefix_clone_2.with_extension("mgmt_stage2.ini"),
+                    &mgmt_cfg_clone_2,
+                )
+                .await
+                {
                     error!("Failed to write mgmt_stage2.ini log: {}", e);
                 }
             });
@@ -281,13 +431,16 @@ pub async fn handle_inform(
             InformResponse::set_config_with_version(
                 Some(cfgversion),
                 Some(system_cfg),
-                Some(mgmt_cfg), 
-                None
+                Some(mgmt_cfg),
+                None,
             )
         }
     } else if !has_our_key && request.default {
         // Device has no auth key and is in default state - truly awaiting adoption
-        info!("Device {} is in default state, waiting for adoption (no auth key)", mac);
+        info!(
+            "Device {} is in default state, waiting for adoption (no auth key)",
+            mac
+        );
         InformResponse::noop(10)
     } else {
         // Just acknowledge the inform
@@ -301,8 +454,11 @@ pub async fn handle_inform(
     };
 
     // Save state
-    if let Err(e) = state_guard.save() {
-        error!("Failed to save state: {}", e);
+    drop(config_guard);
+    let snapshot = state_guard.snapshot();
+    drop(state_guard);
+    if let Err(e) = persist_snapshot(snapshot).await {
+        error!("Failed to persist device state: {}", e);
     }
 
     // Log the response JSON before encryption
@@ -310,7 +466,10 @@ pub async fn handle_inform(
     debug!("Response JSON:\n{}", response_json);
 
     // Build encrypted response - match the device's encryption mode
-    debug!("Responding with crypto: GCM={}, Compressed={}", use_gcm, use_compression);
+    debug!(
+        "Responding with crypto: GCM={}, Compressed={}",
+        use_gcm, use_compression
+    );
 
     let builder = InformResponseBuilder::new(mac, key)
         .use_gcm(use_gcm)
@@ -347,4 +506,57 @@ pub fn should_push_config(device: &state::DeviceState, device_reported_cfgversio
     }
 
     false
+}
+
+fn build_device_telemetry(request: &InformRequest) -> DeviceTelemetry {
+    let mut telemetry = DeviceTelemetry::default();
+
+    for radio in &request.radio_table {
+        if let Some(metrics) = telemetry::extract_radio_metrics(radio) {
+            telemetry.radio_metrics.push(metrics);
+        }
+    }
+
+    for vap in &request.vap_table {
+        if let Some((ssid, count)) = extract_vap_entry(vap) {
+            telemetry.vap_clients.push((ssid, count));
+        }
+    }
+
+    if let Some(stats) = request
+        .system_stats
+        .as_ref()
+        .or(request.sys_stats.as_ref())
+        .and_then(|v| v.as_object())
+    {
+        if let Some(cpu) = stats.get("cpu").and_then(Value::as_f64) {
+            telemetry.cpu_util = Some(cpu);
+        } else if let Some(load) = stats.get("loadavg_5").and_then(Value::as_f64) {
+            telemetry.cpu_util = Some(load * 100.0);
+        }
+
+        if let (Some(used), Some(total)) = (
+            stats.get("mem_used").and_then(Value::as_f64),
+            stats.get("mem_total").and_then(Value::as_f64),
+        ) {
+            if total > 0.0 {
+                telemetry.mem_util = Some((used / total) * 100.0);
+            }
+        }
+    }
+
+    telemetry
+}
+
+fn extract_vap_entry(value: &Value) -> Option<(String, u64)> {
+    let ssid = value
+        .get("essid")
+        .or_else(|| value.get("ssid"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let count = value
+        .get("num_sta")
+        .or_else(|| value.get("sta_count"))
+        .and_then(Value::as_u64)?;
+    Some((ssid, count))
 }

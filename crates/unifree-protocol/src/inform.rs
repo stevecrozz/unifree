@@ -49,15 +49,15 @@ impl InformPacket {
 
         // Parse header
         let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        
+
         let mac = MacAddress::from_bytes(&data[8..14])
             .ok_or_else(|| Error::InvalidPacket("Invalid MAC in header".to_string()))?;
-        
+
         let flags = InformFlags::from_raw(u16::from_be_bytes([data[14], data[15]]));
-        
+
         let mut iv = [0u8; 16];
         iv.copy_from_slice(&data[16..32]);
-        
+
         let payload_version = u32::from_be_bytes([data[32], data[33], data[34], data[35]]);
         let payload_length = u32::from_be_bytes([data[36], data[37], data[38], data[39]]) as usize;
 
@@ -134,7 +134,9 @@ impl InformPacket {
 
         // Snappy compression is rare but might be used
         if self.flags.snappy_compressed {
-            return Err(Error::Decompression("Snappy compression not implemented".to_string()));
+            return Err(Error::Decompression(
+                "Snappy compression not implemented".to_string(),
+            ));
         }
 
         Ok(data)
@@ -145,7 +147,7 @@ impl InformPacket {
         let decrypted = self.decrypt(key)?;
         let json_str = String::from_utf8_lossy(&decrypted);
         tracing::trace!("Decrypted inform payload: {}", json_str);
-        
+
         let request: InformRequest = serde_json::from_slice(&decrypted)?;
         Ok(request)
     }
@@ -185,9 +187,9 @@ impl InformResponseBuilder {
     /// Build an encrypted response packet
     pub fn build(&self, response: &InformResponse) -> Result<Vec<u8>> {
         let json = serde_json::to_vec(response)?;
-        
+
         let mut payload = json;
-        
+
         // Compress if enabled
         if self.use_compression {
             payload = crypto::compress_zlib(&payload)?;
@@ -278,17 +280,17 @@ mod tests {
     fn test_inform_packet_roundtrip() {
         let mac: MacAddress = "1c:0b:8b:8e:17:7f".parse().unwrap();
         let key = AesKey::default_key();
-        
+
         let response = InformResponse::noop(10);
         let builder = InformResponseBuilder::new(mac, key.clone());
-        
+
         let encoded = builder.build(&response).unwrap();
         let decoded = InformPacket::decode(&encoded).unwrap();
-        
+
         assert_eq!(decoded.mac, mac);
         assert!(decoded.flags.encrypted);
         assert!(decoded.flags.aes_gcm);
-        
+
         // Decrypt and verify
         let decrypted = decoded.decrypt(&key).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&decrypted).unwrap();

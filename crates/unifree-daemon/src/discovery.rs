@@ -1,16 +1,16 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tracing::{info, debug, error};
+use tracing::{debug, error, info};
 
-use crate::{SharedState, state::DeviceStatus};
+use crate::{
+    state::{persist_snapshot, DeviceStatus},
+    SharedState,
+};
 use unifree_protocol::discovery::DiscoveryPacket;
 
 /// Run the discovery listener
-pub async fn run_discovery_listener(
-    port: u16,
-    shared: Arc<SharedState>,
-) -> anyhow::Result<()> {
+pub async fn run_discovery_listener(port: u16, shared: Arc<SharedState>) -> anyhow::Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
     socket.set_broadcast(true)?;
 
@@ -40,12 +40,13 @@ pub async fn run_discovery_listener(
                     );
 
                     // Update device state
-                    let should_adopt = {
+                    let (should_adopt, snapshot) = {
                         let mut state_guard = shared.app_state.write().await;
                         let config_guard = shared.daemon_config.read().await;
                         let device = state_guard.get_or_create_device(mac);
 
-                        let was_unknown = device.status == DeviceStatus::Discovered && device.last_seen.is_none();
+                        let was_unknown =
+                            device.status == DeviceStatus::Discovered && device.last_seen.is_none();
                         let current_status = device.status;
 
                         device.last_ip = Some(ip);
@@ -60,13 +61,12 @@ pub async fn run_discovery_listener(
                             && is_default
                             && (was_unknown || current_status == DeviceStatus::Discovered);
 
-                        // Save state to disk
-                        if let Err(e) = state_guard.save() {
-                            error!("Failed to save state: {}", e);
-                        }
-
-                        adopt
+                        (adopt, state_guard.snapshot())
                     };
+
+                    if let Err(e) = persist_snapshot(snapshot).await {
+                        error!("Failed to persist device state: {}", e);
+                    }
 
                     // Auto-adopt if enabled and device is in default state
                     if should_adopt {
@@ -77,7 +77,13 @@ pub async fn run_discovery_listener(
 
                         // Spawn adoption in background to not block discovery
                         tokio::spawn(async move {
-                            crate::adopt::perform_ssh_adoption_flow(state_clone, mac_clone, ip, ssh_port).await;
+                            crate::adopt::perform_ssh_adoption_flow(
+                                state_clone,
+                                mac_clone,
+                                ip,
+                                ssh_port,
+                            )
+                            .await;
                         });
                     }
                 }

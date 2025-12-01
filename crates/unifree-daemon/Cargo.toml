@@ -9,7 +9,10 @@ name = "unifreed"
 path = "src/main.rs"
 
 [dependencies]
-unifree-common = { path = "../unifree-common" }
+unifree-config = { path = "../unifree-config" }
+unifree-state = { path = "../unifree-state" }
+unifree-types = { path = "../unifree-types" }
+unifree-adopt = { path = "../unifree-adopt" }
 unifree-protocol = { path = "../unifree-protocol" }
 
 # Async runtime
@@ -23,10 +26,6 @@ tower-http.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-
-# SSH
-russh.workspace = true
-ssh-key.workspace = true
 
 # Networking
 socket2.workspace = true
@@ -53,7 +52,6 @@ bytes.workspace = true
 # CLI args
 clap.workspace = true
 
-# Async trait for SSH handler
-async-trait = "0.1"
 sha2 = "0.10.9"
-rand = "0.9.2"
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+prometheus.workspace = true

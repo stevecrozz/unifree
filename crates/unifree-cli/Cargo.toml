@@ -9,7 +9,10 @@ name = "unifree"
 path = "src/main.rs"
 
 [dependencies]
-unifree-common = { path = "../unifree-common" }
+unifree-config = { path = "../unifree-config" }
+unifree-state = { path = "../unifree-state" }
+unifree-types = { path = "../unifree-types" }
+unifree-adopt = { path = "../unifree-adopt" }
 unifree-protocol = { path = "../unifree-protocol" }
 
 # Async runtime
@@ -32,7 +35,4 @@ tracing-subscriber.workspace = true
 # Time
 chrono.workspace = true
 
-# SSH for adoption
-russh.workspace = true
-ssh-key.workspace = true
-async-trait = "0.1"
+reqwest = { version = "0.12.24", features = ["json"] }

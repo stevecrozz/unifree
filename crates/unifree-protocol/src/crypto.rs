@@ -4,6 +4,7 @@
 //! along with ZLIB compression.
 
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use rand::RngCore;
 use std::io::{Read, Write};
 
 use crate::{Error, Result, DEFAULT_KEY};
@@ -57,38 +58,47 @@ pub fn encrypt_gcm(key: &AesKey, iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<
 }
 
 /// Encrypt data using AES-128-GCM with Additional Authenticated Data
-/// 
+///
 /// Uses OpenSSL to handle 16-byte IVs correctly (via GHASH) and support AAD.
-pub fn encrypt_gcm_aad(key: &AesKey, iv: &[u8; 16], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+pub fn encrypt_gcm_aad(
+    key: &AesKey,
+    iv: &[u8; 16],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
     use openssl::symm::{Cipher, Crypter, Mode};
-    
+
     let cipher = Cipher::aes_128_gcm();
     let mut crypter = Crypter::new(cipher, Mode::Encrypt, key.as_bytes(), Some(iv))
         .map_err(|e| Error::Encryption(e.to_string()))?;
-    
+
     // Set AAD
     if !aad.is_empty() {
-        crypter.aad_update(aad)
+        crypter
+            .aad_update(aad)
             .map_err(|e| Error::Encryption(e.to_string()))?;
     }
-    
+
     // Encrypt
     let mut ciphertext = vec![0u8; plaintext.len() + cipher.block_size()];
-    let mut count = crypter.update(plaintext, &mut ciphertext)
+    let mut count = crypter
+        .update(plaintext, &mut ciphertext)
         .map_err(|e| Error::Encryption(e.to_string()))?;
-    count += crypter.finalize(&mut ciphertext[count..])
+    count += crypter
+        .finalize(&mut ciphertext[count..])
         .map_err(|e| Error::Encryption(e.to_string()))?;
-    
+
     ciphertext.truncate(count);
-    
+
     // Get tag
     let mut tag = vec![0u8; 16];
-    crypter.get_tag(&mut tag)
+    crypter
+        .get_tag(&mut tag)
         .map_err(|e| Error::Encryption(e.to_string()))?;
-        
+
     // Append tag to ciphertext
     ciphertext.extend_from_slice(&tag);
-    
+
     Ok(ciphertext)
 }
 
@@ -98,40 +108,51 @@ pub fn decrypt_gcm(key: &AesKey, iv: &[u8; 16], ciphertext: &[u8]) -> Result<Vec
 }
 
 /// Decrypt data using AES-128-GCM with Additional Authenticated Data
-/// 
+///
 /// UniFi devices use 16-byte IVs. OpenSSL handles this correctly by
 /// using GHASH preprocessing for non-96-bit IVs.
-pub fn decrypt_gcm_aad(key: &AesKey, iv: &[u8; 16], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_gcm_aad(
+    key: &AesKey,
+    iv: &[u8; 16],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
     use openssl::symm::{Cipher, Crypter, Mode};
-    
+
     // GCM tag is last 16 bytes of ciphertext
     if ciphertext.len() < 16 {
-        return Err(Error::Decryption("Ciphertext too short for GCM tag".to_string()));
+        return Err(Error::Decryption(
+            "Ciphertext too short for GCM tag".to_string(),
+        ));
     }
-    
+
     let (ct, tag) = ciphertext.split_at(ciphertext.len() - 16);
-    
+
     let cipher = Cipher::aes_128_gcm();
     let mut crypter = Crypter::new(cipher, Mode::Decrypt, key.as_bytes(), Some(iv))
         .map_err(|e| Error::Decryption(e.to_string()))?;
-    
+
     // Set AAD before decryption
     if !aad.is_empty() {
-        crypter.aad_update(aad)
+        crypter
+            .aad_update(aad)
             .map_err(|e| Error::Decryption(e.to_string()))?;
     }
-    
+
     // Set the expected tag
-    crypter.set_tag(tag)
+    crypter
+        .set_tag(tag)
         .map_err(|e| Error::Decryption(e.to_string()))?;
-    
+
     // Decrypt
     let mut plaintext = vec![0u8; ct.len() + cipher.block_size()];
-    let mut count = crypter.update(ct, &mut plaintext)
+    let mut count = crypter
+        .update(ct, &mut plaintext)
         .map_err(|e| Error::Decryption(e.to_string()))?;
-    count += crypter.finalize(&mut plaintext[count..])
+    count += crypter
+        .finalize(&mut plaintext[count..])
         .map_err(|e| Error::Decryption(e.to_string()))?;
-    
+
     plaintext.truncate(count);
     Ok(plaintext)
 }
@@ -154,7 +175,7 @@ pub fn encrypt_cbc(key: &AesKey, iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<
     encryptor
         .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buffer, buf_len)
         .map_err(|e| Error::Encryption(e.to_string()))?;
-    
+
     Ok(buffer)
 }
 
@@ -167,11 +188,11 @@ pub fn decrypt_cbc(key: &AesKey, iv: &[u8; 16], ciphertext: &[u8]) -> Result<Vec
 
     let mut buffer = ciphertext.to_vec();
     let decryptor = Aes128CbcDec::new(key.as_bytes().into(), iv.into());
-    
+
     let decrypted = decryptor
         .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer)
         .map_err(|e| Error::Decryption(e.to_string()))?;
-    
+
     Ok(decrypted.to_vec())
 }
 
@@ -198,21 +219,9 @@ pub fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Generate a random IV (16 bytes)
 pub fn generate_iv() -> [u8; 16] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    
-    // Simple IV generation - in production you might want to use a proper RNG
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    
     let mut iv = [0u8; 16];
-    iv[..8].copy_from_slice(&timestamp.to_le_bytes()[..8]);
-    
-    // Add some pseudo-randomness
-    let random_part = std::process::id() as u64 ^ timestamp as u64;
-    iv[8..16].copy_from_slice(&random_part.to_le_bytes());
-    
+    // Use OS-backed RNG to guarantee uniqueness/unpredictability for GCM
+    rand::rngs::OsRng.fill_bytes(&mut iv);
     iv
 }
 
@@ -231,10 +240,10 @@ mod tests {
         let key = AesKey::default_key();
         let iv = generate_iv();
         let plaintext = b"Hello, UniFi!";
-        
+
         let ciphertext = encrypt_gcm(&key, &iv, plaintext).unwrap();
         let decrypted = decrypt_gcm(&key, &iv, &ciphertext).unwrap();
-        
+
         assert_eq!(decrypted, plaintext);
     }
 
@@ -243,20 +252,20 @@ mod tests {
         let key = AesKey::default_key();
         let iv = generate_iv();
         let plaintext = b"Hello, UniFi!";
-        
+
         let ciphertext = encrypt_cbc(&key, &iv, plaintext).unwrap();
         let decrypted = decrypt_cbc(&key, &iv, &ciphertext).unwrap();
-        
+
         assert_eq!(decrypted, plaintext);
     }
 
     #[test]
     fn test_zlib_roundtrip() {
         let data = b"This is some test data that should compress well well well well";
-        
+
         let compressed = compress_zlib(data).unwrap();
         let decompressed = decompress_zlib(&compressed).unwrap();
-        
+
         assert_eq!(decompressed, data);
         assert!(compressed.len() < data.len()); // Should actually compress
     }

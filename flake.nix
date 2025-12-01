@@ -71,6 +71,78 @@
         let
           cfg = config.services.unifree;
           inherit (lib) mkEnableOption mkOption types mkIf;
+          networkType =
+            types.submodule {
+              options = {
+                ssid = mkOption {
+                  type = types.str;
+                  description = "WiFi network name (SSID)";
+                };
+
+                passphrase = mkOption {
+                  type = types.nullOr types.str;
+                  default = null;
+                  description = "WiFi password (use passphraseFile to avoid storing secrets in the Nix store).";
+                };
+
+                passphraseFile = mkOption {
+                  type = types.nullOr types.path;
+                  default = null;
+                  description = "Path to a file containing the WiFi password (plain text).";
+                };
+
+                security = mkOption {
+                  type = types.enum [ "open" "wpa2" "wpa3" "wpa2-wpa3" ];
+                  default = "wpa2-wpa3";
+                  description = "Security mode";
+                };
+
+                bands = mkOption {
+                  type = types.listOf (types.enum [ "2g" "5g" "6g" ]);
+                  default = [ "2g" "5g" ];
+                  description = "Radio bands to broadcast on";
+                };
+
+                vlan = mkOption {
+                  type = types.nullOr types.int;
+                  default = null;
+                  description = "VLAN ID for this network";
+                };
+
+                hidden = mkOption {
+                  type = types.bool;
+                  default = false;
+                  description = "Hide SSID from broadcasts";
+                };
+
+                guest = mkOption {
+                  type = types.bool;
+                  default = false;
+                  description = "Guest network with client isolation";
+                };
+
+                clientDeviceIsolation = mkOption {
+                  type = types.bool;
+                  default = false;
+                  description = "Enable client-device isolation on this network.";
+                };
+
+                iot = mkOption {
+                  type = types.bool;
+                  default = false;
+                  description = "Mark the network as IoT for controller-specific behavior.";
+                };
+
+                pmf = mkOption {
+                  type = types.int;
+                  default = 0;
+                  apply = value:
+                    if value >= 0 && value <= 2 then value
+                    else throw "services.unifree network pmf must be 0 (disabled), 1 (optional) or 2 (required)";
+                  description = "Protected Management Frames mode (0 = disabled, 1 = optional, 2 = required).";
+                };
+              };
+            };
         in
         {
           options.services.unifree = {
@@ -121,6 +193,15 @@
                 Use with caution in shared network environments!
               '';
             };
+
+            autoUpdate = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Automatically upgrade adopted devices to the latest firmware when an update is available.
+                Requires devices to be fully adopted and reporting model/firmware info.
+              '';
+            };
             
             informUrl = mkOption {
               type = types.nullOr types.str;
@@ -159,86 +240,72 @@
               '';
               example = [ "/etc/secrets/unifree-ssh-keys" ];
             };
-            
-            managementUser = mkOption {
+
+            management = mkOption {
               type = types.submodule {
                 options = {
-                  name = mkOption {
-                    type = types.str;
-                    default = "admin";
-                    description = "Management user name for SSH access";
+                  username = mkOption {
+                    type = types.nullOr types.str;
+                    default = null;
+                    description = "Username to provision on managed devices (falls back to vendor default when null).";
                   };
-                  
+
+                  password = mkOption {
+                    type = types.nullOr types.str;
+                    default = null;
+                    description = ''
+                      Password to provision for the management user. Avoid storing secrets directly;
+                      prefer `passwordFile` which is injected at runtime and never written to the Nix store.
+                    '';
+                  };
+
                   passwordFile = mkOption {
                     type = types.nullOr types.path;
                     default = null;
                     description = ''
-                      File containing the password for SSH access.
-                      Should contain a SHA-512 crypt hash (mkpasswd -m sha-512).
-                      If null, password auth is disabled for this user.
+                      Path to a file containing the management password (plain text or SHA-512 crypt hash).
+                      If provided, the value is injected into the runtime config before the service starts.
                     '';
+                  };
+
+                  sshKey = mkOption {
+                    type = types.nullOr types.str;
+                    default = null;
+                    description = "Optional SSH public key to include in mgmt_cfg for the management user.";
+                  };
+
+                  stunUrl = mkOption {
+                    type = types.nullOr types.str;
+                    default = null;
+                    description = "Optional STUN URL advertised to devices.";
                   };
                 };
               };
               default = {};
-              description = "Management user configuration for SSH access to devices";
+              description = "Management configuration stored in the JSON provision file.";
             };
-            
-            # Network configuration type (shared between defaults and device overrides)
-            networkType = types.submodule {
-              options = {
-                ssid = mkOption {
-                  type = types.str;
-                  description = "WiFi network name (SSID)";
-                };
-                
-                passphrase = mkOption {
-                  type = types.nullOr types.str;
-                  default = null;
-                  description = "WiFi password (use passphraseFile for secrets)";
-                };
-                
-                passphraseFile = mkOption {
-                  type = types.nullOr types.path;
-                  default = null;
-                  description = "File containing WiFi password";
-                };
-                
-                security = mkOption {
-                  type = types.enum [ "open" "wpa2" "wpa3" "wpa2-wpa3" ];
-                  default = "wpa2-wpa3";
-                  description = "Security mode";
-                };
-                
-                bands = mkOption {
-                  type = types.listOf (types.enum [ "2g" "5g" "6g" ]);
-                  default = [ "2g" "5g" ];
-                  description = "Radio bands to broadcast on";
-                };
-                
-                vlan = mkOption {
-                  type = types.nullOr types.int;
-                  default = null;
-                  description = "VLAN ID for this network";
-                };
-                
-                hidden = mkOption {
-                  type = types.bool;
-                  default = false;
-                  description = "Hide SSID from broadcasts";
-                };
-                
-                guest = mkOption {
-                  type = types.bool;
-                  default = false;
-                  description = "Guest network with client isolation";
-                };
-              };
+
+            countryCode = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "ISO country code (e.g. \"US\", \"DE\") used for radio settings. Defaults to US when unset.";
+            };
+
+            timezone = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Controller timezone (IANA or POSIX). When null the daemon auto-detects.";
+            };
+
+            ntpServers = mkOption {
+              type = types.listOf types.str;
+              default = [];
+              description = "Global NTP servers to write into system.cfg.";
             };
             
             # Default networks applied to all devices
             defaultNetworks = mkOption {
-              type = types.attrsOf cfg.networkType;
+              type = types.attrsOf networkType;
               default = {};
               description = ''
                 Default WiFi networks applied to all managed APs.
@@ -264,13 +331,6 @@
               '';
             };
             
-            # LED setting
-            ledEnabled = mkOption {
-              type = types.bool;
-              default = true;
-              description = "Enable LEDs on devices (can be overridden per-device)";
-            };
-            
             # Device-specific configuration
             devices = mkOption {
               type = types.attrsOf (types.submodule {
@@ -282,7 +342,7 @@
                   };
                   
                   networks = mkOption {
-                    type = types.attrsOf cfg.networkType;
+                    type = types.attrsOf networkType;
                     default = {};
                     description = "Device-specific network overrides";
                   };
@@ -293,10 +353,10 @@
                     description = "Names of default networks to disable on this device";
                   };
                   
-                  ledEnabled = mkOption {
+                  led = mkOption {
                     type = types.nullOr types.bool;
                     default = null;
-                    description = "LED state override for this device";
+                    description = "LED override for this device (true = on, false = off).";
                   };
                 };
               });
@@ -309,7 +369,7 @@
             # Generate config file
             environment.etc."unifree/config.json".text = let
               # Convert network config to JSON-compatible format
-              networkToJson = name: net: {
+              networkToJson = _: net: {
                 ssid = net.ssid;
                 passphrase = net.passphrase;
                 security = net.security;
@@ -317,6 +377,9 @@
                 vlan = net.vlan;
                 hidden = net.hidden;
                 guest = net.guest;
+                client_device_isolation = net.clientDeviceIsolation;
+                iot = net.iot;
+                pmf = net.pmf;
               };
               
               # Convert SSH keys
@@ -327,17 +390,27 @@
                 value = lib.elemAt parts 1;
                 comment = if lib.length parts > 2 then lib.elemAt parts 2 else null;
               }) cfg.sshKeys;
+
+              managementJson = {
+                username = cfg.management.username;
+                password = cfg.management.password;
+                ssh_key = cfg.management.sshKey;
+                stun_url = cfg.management.stunUrl;
+              };
               
               # Build config object
               configJson = {
+                management = managementJson;
+                country_code = cfg.countryCode;
+                timezone = cfg.timezone;
+                ntp_servers = cfg.ntpServers;
                 networks = lib.mapAttrs networkToJson cfg.defaultNetworks;
                 ssh_keys = sshKeysJson;
-                led_enabled = cfg.ledEnabled;
                 devices = lib.mapAttrs (mac: dev: {
                   name = dev.name;
                   networks = lib.mapAttrs networkToJson dev.networks;
                   disabled_networks = dev.disabledNetworks;
-                  led_enabled = dev.ledEnabled;
+                  led = dev.led;
                 }) cfg.devices;
               };
             in builtins.toJSON configJson;
@@ -350,18 +423,58 @@
               
               # Script to read passwords from files and update config
               preStart = let
-                # Generate script to read passphrases from files
-                readPassphrases = lib.concatStringsSep "\n" (
+                readDefaultPassphrases = lib.concatStringsSep "\n" (
                   lib.mapAttrsToList (name: net:
                     lib.optionalString (net.passphraseFile != null) ''
-                      PASS_${lib.toUpper name}=$(cat "${net.passphraseFile}")
-                      ${pkgs.jq}/bin/jq '.networks.${name}.passphrase = $pass' --arg pass "$PASS_${lib.toUpper name}" $RUNTIME_DIRECTORY/config.json > $RUNTIME_DIRECTORY/config.json.tmp && mv $RUNTIME_DIRECTORY/config.json.tmp $RUNTIME_DIRECTORY/config.json
+                      if [ -f ${lib.escapeShellArg net.passphraseFile} ]; then
+                        pass=$(cat ${lib.escapeShellArg net.passphraseFile})
+                        ${pkgs.jq}/bin/jq \
+                          --arg name ${lib.escapeShellArg name} \
+                          --arg pass "$pass" \
+                          '.networks[$name].passphrase = $pass' \
+                          "$RUNTIME_DIRECTORY/config.json" > "$RUNTIME_DIRECTORY/config.json.tmp"
+                        mv "$RUNTIME_DIRECTORY/config.json.tmp" "$RUNTIME_DIRECTORY/config.json"
+                      fi
                     ''
                   ) cfg.defaultNetworks
                 );
+
+                readDevicePassphrases = lib.concatStringsSep "\n" (
+                  lib.mapAttrsToList (mac: dev:
+                    lib.concatStringsSep "\n" (
+                      lib.mapAttrsToList (name: net:
+                        lib.optionalString (net.passphraseFile != null) ''
+                          if [ -f ${lib.escapeShellArg net.passphraseFile} ]; then
+                            pass=$(cat ${lib.escapeShellArg net.passphraseFile})
+                            ${pkgs.jq}/bin/jq \
+                              --arg mac ${lib.escapeShellArg mac} \
+                              --arg name ${lib.escapeShellArg name} \
+                              --arg pass "$pass" \
+                              '.devices[$mac].networks[$name].passphrase = $pass' \
+                              "$RUNTIME_DIRECTORY/config.json" > "$RUNTIME_DIRECTORY/config.json.tmp"
+                            mv "$RUNTIME_DIRECTORY/config.json.tmp" "$RUNTIME_DIRECTORY/config.json"
+                          fi
+                        ''
+                      ) dev.networks
+                    )
+                  ) cfg.devices
+                );
+
+                readManagementPassword = lib.optionalString (cfg.management.passwordFile != null) ''
+                  if [ -f ${lib.escapeShellArg cfg.management.passwordFile} ]; then
+                    pass=$(cat ${lib.escapeShellArg cfg.management.passwordFile})
+                    ${pkgs.jq}/bin/jq \
+                      --arg pass "$pass" \
+                      '.management.password = $pass' \
+                      "$RUNTIME_DIRECTORY/config.json" > "$RUNTIME_DIRECTORY/config.json.tmp"
+                    mv "$RUNTIME_DIRECTORY/config.json.tmp" "$RUNTIME_DIRECTORY/config.json"
+                  fi
+                '';
               in ''
                 cp /etc/unifree/config.json $RUNTIME_DIRECTORY/config.json
-                ${readPassphrases}
+                ${readDefaultPassphrases}
+                ${readDevicePassphrases}
+                ${readManagementPassword}
               '';
               
               serviceConfig = {
@@ -370,8 +483,9 @@
                 ExecStart = let
                   sshKeyFileArgs = lib.concatMapStringsSep " " (f: "--ssh-key-file '${f}'") cfg.sshKeyFiles;
                   autoAdoptArg = lib.optionalString cfg.autoAdopt "--auto-adopt";
+                  autoUpdateArg = lib.optionalString cfg.autoUpdate "--auto-update";
                   informUrlArg = lib.optionalString (cfg.informUrl != null) "--inform-url '${cfg.informUrl}'";
-                in "${cfg.package}/bin/unifreed --http-addr ${cfg.httpAddress}:${toString cfg.httpPort} --discovery-port ${toString cfg.discoveryPort} --state-dir ${cfg.stateDir} --log-level ${cfg.logLevel} --config /run/unifree/config.json ${autoAdoptArg} ${informUrlArg} ${sshKeyFileArgs}";
+                in "${cfg.package}/bin/unifreed --http-addr ${cfg.httpAddress}:${toString cfg.httpPort} --discovery-port ${toString cfg.discoveryPort} --state-dir ${cfg.stateDir} --log-level ${cfg.logLevel} --config /run/unifree/config.json ${autoAdoptArg} ${autoUpdateArg} ${informUrlArg} ${sshKeyFileArgs}";
                 Restart = "always";
                 RestartSec = 5;
                 

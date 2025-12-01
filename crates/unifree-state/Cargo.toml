@@ -1,0 +1,10 @@
+[package]
+name = "unifree-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+unifree-types = { path = "../unifree-types" }

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-unifree-common = { path = "../unifree-common" }
+unifree-types = { path = "../unifree-types" }
 # Cryptography
 aes-gcm.workspace = true
 aes.workspace = true
@@ -33,6 +33,7 @@ tracing.workspace = true
 ghash = "0.5.1"
 openssl = "0.10.75"
 chrono.workspace = true
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

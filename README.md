@@ -6,7 +6,11 @@ A Rust-based daemon that replaces the UniFi Controller for managing UniFi Access
 
 ## Status
 
-🚧 **Work in Progress** - Not yet ready for production use.
+🚧 **Active development** — feature set is still evolving and breaking changes are expected.
+
+- Controller replacement basics (discovery, adoption, config push) are implemented and used on test hardware.
+- Telemetry and metrics are shipping but dashboards / long‑term storage are not bundled yet.
+- Declarative NixOS integration is functional for single-site setups; multi-site support and secrets tooling are still TODO.
 
 ## Features
 
@@ -14,8 +18,11 @@ A Rust-based daemon that replaces the UniFi Controller for managing UniFi Access
 - ✅ Adopt devices via SSH (`set-adopt` command)
 - ✅ Secure communication (AES-GCM encryption)
 - ✅ SSH key provisioning for management access
-- 🚧 Declarative configuration via NixOS module
-- 📋 Device status monitoring
+- ✅ Auto-updating of device firmware
+- ✅ Full CLI management (upgrade, reset, forget)
+- ✅ `/metrics` and `/telemetry` endpoints for Prometheus/Grafana
+- ✅ Declarative configuration via NixOS module (per-network, per-device overrides)
+- 📋 Device status & telemetry cache exported as JSON
 - 🚀 Lightweight (~5MB RAM footprint)
 
 ## Quick Start
@@ -24,11 +31,20 @@ A Rust-based daemon that replaces the UniFi Controller for managing UniFi Access
 # Build
 cargo build --release
 
-# Run the daemon
-./target/release/unifreed --http-addr 0.0.0.0:8080
+# Run the daemon (with auto-update enabled)
+./target/release/unifreed --http-addr 0.0.0.0:8080 --auto-update --auto-adopt
 
 # List devices
 ./target/release/unifree list
+
+# Adopt a device (triggers SSH adoption via daemon)
+./target/release/unifree adopt <MAC>
+
+# Upgrade a specific device
+./target/release/unifree upgrade <MAC>
+
+# Abandon a device (optionally factory reset it)
+./target/release/unifree abandon <MAC> --factory-reset
 ```
 
 ## NixOS Module
@@ -39,6 +55,16 @@ cargo build --release
     enable = true;
     openFirewall = true;
     autoAdopt = true;  # Auto-adopt new factory-default APs
+
+    management = {
+      username = "jonas";
+      passwordFile = "/run/secrets/unifree-admin-pass";
+      sshKey = "ssh-ed25519 AAAAC3Nza...";
+    };
+
+    countryCode = "DE";
+    timezone = "Europe/Berlin";
+    ntpServers = [ "pool.ntp.org" ];
     
     # SSH keys for management access to all APs
     sshKeys = [
@@ -76,7 +102,7 @@ cargo build --release
     # Device-specific overrides (optional)
     devices."1c0b8b8e177f" = {
       name = "AP-Living-Room";
-      ledEnabled = false;  # Disable LED on this AP
+      led = false;  # Disable LED on this AP
       
       # Override the home network SSID for this AP
       networks.home = {
@@ -107,6 +133,31 @@ cargo build --release
 ┌─────────────────┐
 │  UniFi AP       │
 └─────────────────┘
+
+### Components
+
+- **unifree-protocol** – inform/discovery packet encode/decode, crypto helpers.
+- **unifree-config** – provisioning models and INI generators used by both daemon and CLI.
+- **unifree-state** – device state structs shared between CLI/daemon.
+- **unifree-adopt** – libssh2-powered adoption helpers (`set-adopt`, `restore-default`).
+- **unifree-daemon** – Axum/Tokio service orchestrating discovery, inform handling, adoption, config pushes, and telemetry.
+- **unifree-cli** – operator tool for manual actions and troubleshooting.
+
+All crates live in this workspace and can be built/tested individually via `cargo check -p <crate>`.
+
+### Telemetry & Monitoring
+
+- `GET /metrics` exposes Prometheus-format gauges/counters for radio client counts, TX power, noise floor, per-SSID client counts, and device CPU/memory utilization.
+- `GET /telemetry` returns the latest per-device RF snapshot as JSON for dashboards that need richer detail (client RSSI, per-radio stats, etc.).
+- Downstream systems (Prometheus, Grafana, Loki, etc.) are expected to scrape/persist data; the daemon only keeps the latest snapshot per device.
+
+## Roadmap
+
+- [ ] Grafana dashboards and recording rules based on the new metrics.
+- [ ] Multi-site / multi-controller coordination (federated configs).
+- [ ] Switch/bridge support (LLDP, port/VLAN telemetry).
+- [ ] Pluggable secrets management (Vault/age for SSH credentials).
+- [ ] Web UI for light-touch operations (device overview, adoption queue).
 ```
 
 ## License

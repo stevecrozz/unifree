@@ -3,11 +3,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tokio::fs as tokio_fs;
 
-pub use unifree_common::state::DeviceState;
-use unifree_common::types::MacAddress;
-
-pub use unifree_common::state::DeviceStatus;
+pub use unifree_state::{DeviceState, DeviceStatus};
+use unifree_types::MacAddress;
 
 /// Application state
 pub struct AppState {
@@ -21,10 +20,10 @@ impl AppState {
     /// Create new app state, loading from disk if exists
     pub fn new(state_dir: &str) -> anyhow::Result<Self> {
         let state_dir = PathBuf::from(state_dir);
-        
+
         // Create state directory if it doesn't exist
         fs::create_dir_all(&state_dir)?;
-        
+
         let devices_file = state_dir.join("devices.json");
         let devices = if devices_file.exists() {
             let data = fs::read_to_string(&devices_file)?;
@@ -36,18 +35,43 @@ impl AppState {
         Ok(Self { state_dir, devices })
     }
 
-            /// Get or create a device entry                                                               
-            pub fn get_or_create_device(&mut self, mac: MacAddress) -> &mut DeviceState {                  
-                self.devices.entry(mac).or_insert_with(|| DeviceState {                                    
-                    mac,                                                                                   
-                    ..Default::default()                                                                   
-                })                                                                                         
-            }                                                                                              
-                                                                                                           
-            /// Save state to disk                                                                         
-            pub fn save(&self) -> anyhow::Result<()> {            let devices_file = self.state_dir.join("devices.json");                                    
-            let data = serde_json::to_string_pretty(&self.devices)?;                                   
-            fs::write(devices_file, data)?;                                                            
-            Ok(())                                                                                     
-        }
+    /// Get or create a device entry
+    pub fn get_or_create_device(&mut self, mac: MacAddress) -> &mut DeviceState {
+        self.devices.entry(mac).or_insert_with(|| DeviceState {
+            mac,
+            ..Default::default()
+        })
     }
+
+    /// Prepare a snapshot that can be persisted without holding the lock
+    pub fn snapshot(&self) -> anyhow::Result<StateSnapshot> {
+        let devices_file = self.state_dir.join("devices.json");
+        let data = serde_json::to_string_pretty(&self.devices)?;
+        Ok(StateSnapshot {
+            path: devices_file,
+            data,
+        })
+    }
+}
+
+/// Serializable snapshot of the device state
+pub struct StateSnapshot {
+    path: PathBuf,
+    data: String,
+}
+
+impl StateSnapshot {
+    /// Persist the snapshot asynchronously
+    pub async fn persist(self) -> anyhow::Result<()> {
+        tokio_fs::write(self.path, self.data).await?;
+        Ok(())
+    }
+}
+
+/// Persist a snapshot result, propagating serialization or IO errors
+pub async fn persist_snapshot(result: anyhow::Result<StateSnapshot>) -> anyhow::Result<()> {
+    match result {
+        Ok(snapshot) => snapshot.persist().await,
+        Err(e) => Err(e),
+    }
+}

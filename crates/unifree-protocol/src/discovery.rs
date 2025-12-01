@@ -247,14 +247,14 @@ mod tests {
         let mut packet = DiscoveryPacket::new();
         let mac: MacAddress = "1c:0b:8b:8e:17:7f".parse().unwrap();
         let ip: IpAddr = "192.168.1.100".parse().unwrap();
-        
+
         packet.set_mac(mac);
         packet.set_mac_ip(mac, ip);
         packet.set_ssh_port(22);
-        
+
         let encoded = packet.encode();
         let decoded = DiscoveryPacket::decode(&encoded).unwrap();
-        
+
         assert_eq!(decoded.mac(), Some(mac));
         assert_eq!(decoded.ip(), Some(ip));
         assert_eq!(decoded.ssh_port(), Some(22));
@@ -265,10 +265,10 @@ mod tests {
         let mut packet = DiscoveryPacket::new();
         let mac: MacAddress = "1c:0b:8b:8e:17:7f".parse().unwrap();
         let ip: IpAddr = "192.168.1.100".parse().unwrap();
-        
+
         packet.set_mac_ip(mac, ip);
         packet.set_ssh_port(22);
-        
+
         let device: DiscoveredDevice = packet.try_into().unwrap();
         assert_eq!(device.mac, mac);
         assert_eq!(device.ip, ip);
