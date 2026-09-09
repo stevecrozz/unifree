@@ -338,9 +338,9 @@ pub async fn handle_inform(
         // Use the magic ADOPT_CFG_VERSION for the initial mgmt config to signal readiness for system_cfg
         let cfgversion = unifree_protocol::ADOPT_CFG_VERSION.to_string();
 
-        // Include auth_key and inform_url in mgmt_cfg for adoption
+        // Include auth_key in mgmt_cfg for adoption; the generator ignores inform_url
         let auth_key = device.auth_key.as_deref();
-        let inform_url = Some(config_guard.inform_url.as_str());
+        let inform_url: Option<&str> = None;
         let mgmt_cfg = config_guard.provision.generate_mgmt_cfg_with_auth(
             &mac_str,
             auth_key,
@@ -405,7 +405,8 @@ pub async fn handle_inform(
             // Also generate mgmt_cfg with the new version to ensure device updates its state
             // The device needs cfgversion in mgmt_cfg to persist the new version
             let auth_key = device.auth_key.as_deref();
-            let inform_url = Some(config_guard.inform_url.as_str());
+            // Not included in mgmt_cfg; the generator ignores this
+            let inform_url: Option<&str> = None;
             let mgmt_cfg = config_guard.provision.generate_mgmt_cfg_with_auth(
                 &mac_str,
                 auth_key,

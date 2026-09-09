@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     state::{persist_snapshot, DeviceStatus},
+    utils::choose_inform_url,
     SharedState,
 };
 use unifree_adopt::{execute_ssh_command, generate_auth_key};
@@ -115,13 +116,28 @@ pub async fn perform_ssh_adoption_flow(
 
     info!("Starting SSH adoption for {} at {}:{}", mac, ip, ssh_port);
 
-    let (ssh_user, ssh_pass, inform_url) = {
+    let (ssh_user, ssh_pass, inform_url_override, http_port) = {
         let config = shared.daemon_config.read().await;
         (
             config.ssh_user.clone(),
             config.ssh_pass.clone(),
-            config.inform_url.clone(),
+            config.inform_url_override.clone(),
+            config.http_port,
         )
+    };
+
+    // Use the address that routes to this device; set-adopt makes it stick,
+    // so skip rather than fall back to something unreachable
+    let inform_url = match choose_inform_url(inform_url_override, ip, http_port) {
+        Some(url) => url,
+        None => {
+            error!(
+                "No local address routable to {} at {}; skipping adoption. \
+                 Pass --inform-url to set it explicitly.",
+                mac, ip
+            );
+            return;
+        }
     };
 
     // Generate key and update state BEFORE SSH to handle race condition

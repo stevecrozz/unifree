@@ -36,7 +36,6 @@ use crate::api::metrics::{metrics_handler, telemetry_json};
 use crate::discovery::run_discovery_listener;
 use crate::firmware::FirmwareManager;
 use crate::tasks::{run_config_reloader, run_stale_adoption_cleanup};
-use crate::utils::get_local_ip;
 use config::ProvisionConfig;
 use state::AppState;
 
@@ -47,8 +46,10 @@ pub struct DaemonConfig {
     pub auto_adopt: bool,
     /// Auto-update device firmware when available
     pub auto_update: bool,
-    /// Inform URL to advertise to devices
-    pub inform_url: String,
+    /// Inform URL override; derived per device when None
+    pub inform_url_override: Option<String>,
+    /// HTTP listen port, used to build derived inform URLs
+    pub http_port: u16,
     /// SSH credentials for adoption
     pub ssh_user: String,
     pub ssh_pass: String,
@@ -200,15 +201,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Determine inform URL
-    let inform_url = args.inform_url.unwrap_or_else(|| {
-        format!(
-            "http://{}:{}/inform",
-            get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
-            args.http_addr.port()
-        )
-    });
-    info!("Inform URL: {}", inform_url);
+    // Derived per device at adoption time; no device is known yet
+    info!("Inform URL override: {:?}", args.inform_url);
 
     if args.auto_adopt {
         info!("Auto-adopt enabled: new devices will be automatically adopted");
@@ -265,7 +259,8 @@ async fn main() -> anyhow::Result<()> {
     let daemon_config = DaemonConfig {
         auto_adopt: args.auto_adopt,
         auto_update: args.auto_update,
-        inform_url,
+        inform_url_override: args.inform_url,
+        http_port: args.http_addr.port(),
         ssh_user,
         ssh_pass,
         provision,
